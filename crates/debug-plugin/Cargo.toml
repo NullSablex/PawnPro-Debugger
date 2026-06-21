@@ -1,0 +1,14 @@
+[package]
+name = "debug-plugin"
+description = "Plugin do servidor SA-MP/open.mp: debug hook, breakpoint, step, inspeção de memória."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+amxdbg = { path = "../amxdbg" }
+# samp-sdk = { ... }  # adicionar quando o caminho do rust-samp for fixado

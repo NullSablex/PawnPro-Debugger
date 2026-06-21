@@ -1,0 +1,14 @@
+[package]
+name = "dap-adapter"
+description = "Adaptador Debug Adapter Protocol (DAP) — fala DAP com o editor e protocolo próprio com o plugin."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "dap-adapter"
+path = "src/main.rs"
+
+[dependencies]
+amxdbg = { path = "../amxdbg" }

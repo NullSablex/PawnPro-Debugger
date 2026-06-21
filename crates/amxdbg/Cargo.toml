@@ -1,0 +1,9 @@
+[package]
+name = "amxdbg"
+description = "Parser do formato de debug AMX_DBG — mapeia endereço ↔ linha ↔ símbolo."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
