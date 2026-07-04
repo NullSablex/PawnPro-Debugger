@@ -17,7 +17,7 @@ interprocess = "2"
 # `debug`, o parser AMX_DBG em `samp::debug`. Importável como `samp`.
 # Pinado por SHA no fork (sdk 3.2.0, expõe read_code/pri/alt/opcode_table via
 # prelude). Trocar por `version = "3.2"` quando publicado no crates.io.
-samp = { package = "rust-samp", git = "https://github.com/NullSablex/rust-samp", rev = "55f7508bfb66474c00e814a912a2985fcc1991b2", features = ["debug"] }
+samp = { package = "rust-samp", git = "https://github.com/NullSablex/rust-samp", rev = "98b4143b0b9f56b95dbce1c51394198e553e255a", features = ["debug"] }
 
 [package.metadata.samp]
 uid = "0x0d9107bbd31c8d1b"
