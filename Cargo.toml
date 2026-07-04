@@ -1,13 +1,13 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
-    "crates/amxdbg",
+    "crates/protocol",
     "crates/debug-plugin",
     "crates/dap-adapter",
 ]
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
-license = "MIT"
+edition = "2024"
+license = "AGPL-3.0-or-later"
 repository = "https://github.com/NullSablex/PawnPro-Debugger"

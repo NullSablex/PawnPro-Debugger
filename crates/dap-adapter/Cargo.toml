@@ -11,4 +11,12 @@ name = "dap-adapter"
 path = "src/main.rs"
 
 [dependencies]
-amxdbg = { path = "../amxdbg" }
+# Parser AMX_DBG vem do SDK (`samp_sdk::debug`), fonte única compartilhada com o
+# debug-plugin. `default-features = false` + só `debug` = lógica pura, sem FFI.
+# Pinado por SHA no fork (sdk 3.2.0, com read_code/pri/alt/opcode_table). Trocar
+# por `version = "3.2"` quando publicado no crates.io.
+rust-samp-sdk = { git = "https://github.com/NullSablex/rust-samp", rev = "55f7508bfb66474c00e814a912a2985fcc1991b2", default-features = false, features = ["debug"] }
+pawnpro-dbg-protocol = { path = "../protocol" }
+interprocess = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

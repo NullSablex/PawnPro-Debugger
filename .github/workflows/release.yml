@@ -1,0 +1,215 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # --- Plugin do servidor: um binário UNIVERSAL por SO (serve SA-MP e open.mp),
+  # compilado para i686 (a arquitetura do servidor). ---
+  build-plugin:
+    name: Plugin (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # O artefato usa o nome EXATO que a extensão exige na pasta do servidor
+          # (`pawnpro_debug.{so,dll}`, ver `DEBUG_PLUGIN_NAME` em
+          # `pawnpro/src/core/server.ts`). O SA-MP/open.mp carrega o plugin pelo
+          # nome do arquivo, então renomear aqui evita atrito manual ao instalar.
+          - target: i686-unknown-linux-gnu
+            label: linux-i686
+            out: target/i686-unknown-linux-gnu/release/libdebug_plugin.so
+            artifact: pawnpro_debug.so
+            xwin: false
+          - target: i686-pc-windows-msvc
+            label: windows-i686
+            out: target/i686-pc-windows-msvc/release/debug_plugin.dll
+            artifact: pawnpro_debug.dll
+            xwin: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross tools (Linux i686)
+        if: ${{ !matrix.xwin }}
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-multilib g++-multilib
+
+      - name: Install cargo-xwin (Windows i686)
+        if: ${{ matrix.xwin }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends clang llvm
+          cargo install cargo-xwin --locked
+
+      - name: Build plugin (Linux)
+        if: ${{ !matrix.xwin }}
+        run: cargo build --release -p debug-plugin --target ${{ matrix.target }}
+
+      - name: Build plugin (Windows via xwin)
+        if: ${{ matrix.xwin }}
+        run: cargo xwin build --xwin-arch x86 --release -p debug-plugin --target ${{ matrix.target }}
+
+      - name: Stage artifact
+        run: |
+          mkdir -p dist
+          cp "${{ matrix.out }}" "dist/${{ matrix.artifact }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+          if-no-files-found: error
+
+  # --- Adaptador DAP: roda na máquina do dev (host), não no servidor. Um binário
+  # por host suportado pela extensão. ---
+  build-adapter:
+    name: Adapter (${{ matrix.artifact }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: pawnpro-dap-adapter-linux-x64
+            ext: ''
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: pawnpro-dap-adapter-linux-arm64
+            ext: ''
+            use_cross: true
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact: pawnpro-dap-adapter-win32-x64.exe
+            ext: '.exe'
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            artifact: pawnpro-dap-adapter-darwin-x64
+            ext: ''
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact: pawnpro-dap-adapter-darwin-arm64
+            ext: ''
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (Linux arm64)
+        if: matrix.use_cross
+        run: cargo install cross --locked
+
+      - name: Build adapter (cross)
+        if: matrix.use_cross
+        run: cross build --release -p dap-adapter --target ${{ matrix.target }}
+
+      - name: Build adapter (cargo)
+        if: ${{ !matrix.use_cross }}
+        run: cargo build --release -p dap-adapter --target ${{ matrix.target }}
+
+      - name: Stage artifact (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/dap-adapter${{ matrix.ext }}" "dist/${{ matrix.artifact }}"
+
+      - name: Stage artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/dap-adapter.exe" "dist/${{ matrix.artifact }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+          if-no-files-found: error
+
+  # --- Junta os artefatos, gera checksums e publica a release. ---
+  release:
+    name: Create GitHub Release
+    needs: [build-plugin, build-adapter]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Verify Cargo.toml version matches tag
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CARGO="$(grep -m1 '^version' Cargo.toml | sed 's/.*= *"\(.*\)"/\1/')"
+          if [ "$TAG" != "$CARGO" ]; then
+            echo "::error::Tag v$TAG ≠ Cargo.toml $CARGO"; exit 1
+          fi
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: Generate SHA-256 checksums
+        run: |
+          cd dist
+          sha256sum * > checksums.sha256
+          cat checksums.sha256
+
+      - name: Build release body
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          BODY=$(awk "/^## \[?v?${VERSION}\]?/{found=1; next} found && /^## /{exit} found{print}" CHANGELOG.md 2>/dev/null \
+            | awk '{lines[NR]=$0} END{n=NR; while(n>0 && (lines[n] ~ /^[[:space:]]*$/ || lines[n] ~ /^---[[:space:]]*$/)) n--; for(i=1;i<=n;i++) print lines[i]}')
+          [ -z "$BODY" ] && BODY="Consulte o CHANGELOG para detalhes."
+          {
+            echo "$BODY"
+            echo ""
+            echo "---"
+            echo ""
+            echo "### Artefatos"
+            echo ""
+            echo "**Plugin do servidor** (copie para a pasta \`plugins/\` ou \`components/\` do servidor **sem renomear** — um binário serve SA-MP e open.mp):"
+            echo "- \`pawnpro_debug.so\` — Linux i686"
+            echo "- \`pawnpro_debug.dll\` — Windows i686"
+            echo ""
+            echo "**Adaptador DAP** (usado pela extensão PawnPro; baixado automaticamente):"
+            echo "- \`pawnpro-dap-adapter-*\` — por sistema/arquitetura do host"
+          } > release_body.md
+          cat release_body.md
+
+      - name: Create Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          files: dist/*
+          body_path: release_body.md
+          fail_on_unmatched_files: true
