@@ -25,7 +25,16 @@ Podem existir falhas ou itens não declarados, causados por falha humana ou por 
 ### Alterado
 - **Mensagens localizadas centralizadas** em `crates/protocol/src/messages` — `Locale`, as 11 `MsgKey` e uma tabela por idioma (pt-BR, en, es, ro, ru), compartilhadas pelo plugin e pelo adaptador. O `match` por chave é exaustivo: idioma incompleto não compila.
 - **Primeiro canal request/response do protocolo** — `Command::ReadMemory` ↔ `Event::MemoryData`, correlacionados por `id` e com timeout, sem prender a sessão se o plugin não responder.
-- Documentação reescrita: `README.md`, `docs/features.md`, `docs/architecture.md`, `docs/index.md` e a nova página de [localização](docs/i18n.md), com a meta de 50 idiomas.
+- **Documentação reescrita** — `README.md` (com badges de CI, CodeQL, docs, OpenSSF Scorecard, release, downloads, stars e licença), `docs/features.md`, `docs/architecture.md`, `docs/index.md`, `docs/getting-started.md` e a nova página de [localização](docs/i18n.md), com a meta de 50 idiomas.
+- **Site da documentação bilíngue** — `mkdocs-static-i18n` com **pt-BR** na raiz e **en-US** em `/en-US/`, as seis páginas traduzidas e o nav por `nav_translations`. O tema do locale `en-US` aponta para `en`, porque o Material só traz tabela de interface para `en`.
+- **Comentários do código padronizados em português** — `hook.rs` estava inteiramente em inglês (mais pontos isolados em `plugin_client.rs`, `inspect.rs` e `langs/en.rs`); na passagem, cortado o que apenas repetia a assinatura.
+
+### Corrigido
+- Tabela de erros em `docs/runtime-errors.md`: faltavam `OP_CALL_PRI` no STACKERR e `OP_LODB_I`/`OP_STRB_I`/`OP_LIDX_B` no MEMACCESS, todos já checados no plugin.
+- Doc de `resolve_data_watches`, que ainda dizia que arrays não eram observáveis — elementos de array passaram a ser.
+
+### Infraestrutura
+- **OpenSSF Scorecard** (`.github/workflows/scorecard.yml`) — análise em push no `master`, semanal e manual, com actions pinadas por SHA e permissões mínimas. Publica na API pública do OpenSSF (o que sustenta o badge) e envia o SARIF ao code scanning.
 
 ## [0.1.0] - 04/07/2026
 
