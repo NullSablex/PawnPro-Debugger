@@ -8,7 +8,10 @@
   <a href="https://github.com/NullSablex/PawnPro-Debugger/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/NullSablex/PawnPro-Debugger/ci.yml?branch=master&label=CI&logo=github"></a>
   <a href="https://github.com/NullSablex/PawnPro-Debugger/actions/workflows/codeql.yml"><img alt="CodeQL" src="https://img.shields.io/github/actions/workflow/status/NullSablex/PawnPro-Debugger/codeql.yml?branch=master&label=CodeQL&logo=github"></a>
   <a href="https://pawnpro-debugger.nullsablex.com/"><img alt="Docs" src="https://img.shields.io/github/actions/workflow/status/NullSablex/PawnPro-Debugger/docs.yml?branch=master&label=docs&logo=materialformkdocs"></a>
+  <a href="https://securityscorecards.dev/viewer/?uri=github.com/NullSablex/PawnPro-Debugger"><img alt="OpenSSF Scorecard" src="https://img.shields.io/ossf-scorecard/github.com/NullSablex/PawnPro-Debugger?label=scorecard"></a>
   <a href="https://github.com/NullSablex/PawnPro-Debugger/releases"><img alt="Release" src="https://img.shields.io/github/v/release/NullSablex/PawnPro-Debugger?include_prereleases&label=release&logo=github"></a>
+  <a href="https://github.com/NullSablex/PawnPro-Debugger/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/NullSablex/PawnPro-Debugger/total?label=downloads&logo=github"></a>
+  <a href="https://github.com/NullSablex/PawnPro-Debugger/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/NullSablex/PawnPro-Debugger?style=flat&logo=github"></a>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-edition%202024-000000?logo=rust">
   <a href="LICENSE"><img alt="Licença" src="https://img.shields.io/badge/licen%C3%A7a-AGPL--3.0--or--later-blue"></a>
 </p>
