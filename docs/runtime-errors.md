@@ -47,9 +47,9 @@ código-fonte de nenhum dos dois, porque ambos usam a mesma VM AMX.
 | Divisão por zero | `OP_SDIV` / `OP_UDIV` | divisor (`alt`) é zero |
 | Divisão por zero | `OP_SDIV_ALT` / `OP_UDIV_ALT` | divisor (`pri`) é zero |
 | Índice fora do limite | `OP_BOUNDS` | `(unsigned) pri > limite` |
-| Colisão pilha/heap (`STACKERR`) | `OP_STACK` / `OP_HEAP` / `OP_PROC` / `OP_CALL` (`CHKMARGIN`) | `hea + STKMARGIN > stk` (no `CALL`, antecipa o `PROC` do chamado) |
+| Colisão pilha/heap (`STACKERR`) | `OP_STACK` / `OP_HEAP` / `OP_PROC` / `OP_CALL` / `OP_CALL_PRI` (`CHKMARGIN`) | `hea + STKMARGIN > stk` (no `CALL`, antecipa o `PROC` do chamado) |
 | Underflow de heap (`HEAPLOW`) | `OP_HEAP` (`CHKHEAP`) | `hea < hlw` |
-| Acesso inválido à memória (`MEMACCESS`) | `OP_LOAD_I` / `OP_STOR_I` / `OP_LIDX` (`VERIFYADDRESS`) | endereço em `[hea, stk)` ou `>= stp` |
+| Acesso inválido à memória (`MEMACCESS`) | `OP_LOAD_I` / `OP_LODB_I` / `OP_STOR_I` / `OP_STRB_I` / `OP_LIDX` / `OP_LIDX_B` (`VERIFYADDRESS`) | endereço em `[hea, stk)` ou `>= stp` |
 
 Ao detectar, o debugger pausa com `reason: "exception"` e a mensagem no idioma do
 editor, mostrando a linha e as variáveis — como um breakpoint normal.
