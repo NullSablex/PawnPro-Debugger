@@ -5,6 +5,7 @@
 //! Loop síncrono sobre stdin/stdout (igual a um LSP básico). Uma thread separada
 //! recebe eventos do plugin (socket local) e os escreve como eventos DAP no stdout.
 
+mod expr;
 mod messages;
 mod plugin_client;
 mod protocol;

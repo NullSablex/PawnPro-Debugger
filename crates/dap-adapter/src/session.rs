@@ -597,11 +597,10 @@ impl Session {
         self.reply_with(req, Command::SetDataBreakpoints { watches }, body)
     }
 
-    /// `evaluate`: usado pelo painel INSPEÇÃO (watch) e pelo hover. Avalia uma
-    /// expressão simples — por ora, o NOME de uma variável em escopo — buscando
-    /// nas variáveis da última pausa. Expressões compostas ainda não são
-    /// suportadas; nesses casos respondemos com erro amigável (DAP exige falha no
-    /// `evaluate` para o editor mostrar "não disponível" em vez de um valor falso).
+    /// `evaluate`: painel INSPEÇÃO (watch) e hover. Avalia a expressão com o
+    /// [`crate::expr`] contra as variáveis do frame: nome, literal, `arr[i]`, ou
+    /// `A OP B` (aritmética/comparação). O que não avaliar vira falha explícita
+    /// (o DAP exige falha para o editor mostrar "não disponível", não um valor falso).
     fn on_evaluate(&mut self, req: &Request) -> Vec<Outgoing> {
         let expr = req
             .arguments
@@ -618,21 +617,15 @@ impl Session {
             .and_then(|id| usize::try_from(id - 1).ok())
             .unwrap_or(0);
 
-        // Busca exata pelo nome da variável no frame selecionado.
-        let found = crate::plugin_client::frame_vars(frame)
-            .into_iter()
-            .find(|v| v.name == expr);
-
         let seq = self.next_seq();
-        if let Some(v) = found {
-            let body = json!({ "result": v.value, "variablesReference": 0 });
+        if let Some(result) = crate::expr::eval(expr, &crate::plugin_client::frame_vars(frame)) {
+            let body = json!({ "result": result, "variablesReference": 0 });
             vec![Outgoing::Response(Response::ok(seq, req, body))]
         } else {
-            // Sem a variável em escopo (ou expressão composta): falha explícita.
             let detail = if expr.is_empty() {
                 "expressão vazia".to_string()
             } else {
-                format!("'{expr}' não está em escopo")
+                format!("não foi possível avaliar '{expr}'")
             };
             vec![Outgoing::Response(Response::fail(seq, req, detail))]
         }
