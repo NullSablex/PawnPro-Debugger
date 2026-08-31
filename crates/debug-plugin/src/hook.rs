@@ -265,10 +265,14 @@ fn detect_runtime_error(amx: &Amx, at: u32) -> Option<runtime_error::RuntimeErro
     let guard = OPCODE_MAP.lock().ok()?;
     let map = guard.as_ref()?;
     let (pri, alt, frm) = (amx.pri()?, amx.alt()?, amx.frame()?);
+    // Ponteiros de pilha/heap e limites, para detectar STACKERR/HEAPLOW/MEMACCESS.
+    let (stk, hea, hlw, stp) = (amx.stack()?, amx.heap()?, amx.hlw()?, amx.stp()?);
     let read_code = |off: u32| amx.read_code(off);
     let read_data = |addr: i32| amx.read_cell(addr);
     let decode = |raw: i32| map.decode(raw);
-    runtime_error::scan_line(at, pri, alt, frm, &read_code, &read_data, &decode)
+    runtime_error::scan_line(
+        at, pri, alt, frm, stk, hea, hlw, stp, &read_code, &read_data, &decode,
+    )
 }
 
 /// Verifica os data breakpoints neste passo: devolve o nome da variável observada

@@ -16,11 +16,11 @@ desenvolvimento.
 | Inspeção de variáveis | ✅ | int, `Float:`, `bool:`, array, hex — em escopo. |
 | Watch / hover | ✅ | |
 | Editar variável | ✅ | Durante a pausa (`setVariable`). |
-| Pausar em erro de runtime | ✅ | Divisão por zero e índice fora do limite; pausa na linha, antes do abort. SA-MP e open.mp. |
+| Pausar em erro de runtime | ✅ | Divisão por zero, índice fora do limite, colisão pilha/heap, underflow de heap e acesso inválido à memória; pausa na linha, antes do abort. SA-MP e open.mp. |
 | Mensagens localizadas | ✅ | pt-BR, en, es, ro, ru (segue o idioma do editor). |
 | Call stack multi-frame | ✅ | Caminha a cadeia de frames (FRM→retorno); nome da função, linha e variáveis por frame. |
 | Data breakpoints | ✅ | Pausar quando uma variável muda (globais e locais); locais expiram ao retornar o frame. |
-| Mais erros de runtime | ⬜ | STACKERR / MEMACCESS / HEAPLOW — em avaliação. |
+| Mais erros de runtime | ✅ | STACKERR (colisão pilha/heap), HEAPLOW (underflow de heap) e MEMACCESS (acesso inválido) — simulação fiel ao `amx.c`, conservadora. |
 
 ## Estrutura (workspace Cargo)
 
