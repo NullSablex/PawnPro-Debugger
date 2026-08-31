@@ -87,36 +87,10 @@ const OP_PARAMS: [u8; OP_NUM_OPCODES] = [
     3,3,3,4,4,4,4,5,5,5,5,2,2,2,2,
 ];
 
-/// Idioma das mensagens de erro, resolvido do locale do editor. Espelha o
-/// conjunto da engine LSP (mesma regra `from_str`: prefixo de 2 letras).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Locale {
-    PtBr,
-    Es,
-    Ru,
-    Ro,
-    #[default]
-    En,
-}
-
-impl Locale {
-    /// Resolve do código de locale (`pt-BR`, `es`, ...). Desconhecido → inglês.
-    #[must_use]
-    pub fn from_str(s: &str) -> Self {
-        let s = s.to_ascii_lowercase();
-        if s.starts_with("pt") {
-            Self::PtBr
-        } else if s.starts_with("es") {
-            Self::Es
-        } else if s.starts_with("ru") {
-            Self::Ru
-        } else if s.starts_with("ro") {
-            Self::Ro
-        } else {
-            Self::En
-        }
-    }
-}
+// Idioma das mensagens: definido uma vez no protocolo (compartilhado com o
+// adaptador). Re-exportado para os usos internos do plugin.
+pub use pawnpro_dbg_protocol::messages::Locale;
+use pawnpro_dbg_protocol::messages::{self, MsgKey};
 
 /// Erro de runtime iminente detectado no hook.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,37 +112,22 @@ pub enum RuntimeError {
 }
 
 impl RuntimeError {
+    /// Chave da mensagem localizável correspondente.
+    #[must_use]
+    fn key(self) -> MsgKey {
+        match self {
+            RuntimeError::DivideByZero => MsgKey::DivideByZero,
+            RuntimeError::Bounds => MsgKey::Bounds,
+            RuntimeError::StackError => MsgKey::StackError,
+            RuntimeError::HeapLow => MsgKey::HeapLow,
+            RuntimeError::MemAccess => MsgKey::MemAccess,
+        }
+    }
+
     /// Texto curto para o `stopped` (reason "exception") do DAP, no idioma dado.
     #[must_use]
     pub fn message(self, locale: Locale) -> &'static str {
-        use Locale::{En, Es, PtBr, Ro, Ru};
-        match (self, locale) {
-            (RuntimeError::DivideByZero, PtBr) => "divisão por zero",
-            (RuntimeError::DivideByZero, Es) => "división por cero",
-            (RuntimeError::DivideByZero, Ru) => "деление на ноль",
-            (RuntimeError::DivideByZero, Ro) => "împărțire la zero",
-            (RuntimeError::DivideByZero, En) => "division by zero",
-            (RuntimeError::Bounds, PtBr) => "índice de array fora do limite",
-            (RuntimeError::Bounds, Es) => "índice de matriz fuera de límite",
-            (RuntimeError::Bounds, Ru) => "индекс массива вне диапазона",
-            (RuntimeError::Bounds, Ro) => "index de matrice în afara limitelor",
-            (RuntimeError::Bounds, En) => "array index out of bounds",
-            (RuntimeError::StackError, PtBr) => "estouro de pilha (colisão pilha/heap)",
-            (RuntimeError::StackError, Es) => "desbordamiento de pila (colisión pila/montículo)",
-            (RuntimeError::StackError, Ru) => "переполнение стека (столкновение стека и кучи)",
-            (RuntimeError::StackError, Ro) => "depășire de stivă (coliziune stivă/heap)",
-            (RuntimeError::StackError, En) => "stack overflow (stack/heap collision)",
-            (RuntimeError::HeapLow, PtBr) => "underflow de heap",
-            (RuntimeError::HeapLow, Es) => "subdesbordamiento del montículo",
-            (RuntimeError::HeapLow, Ru) => "переполнение кучи снизу",
-            (RuntimeError::HeapLow, Ro) => "subdepășire de heap",
-            (RuntimeError::HeapLow, En) => "heap underflow",
-            (RuntimeError::MemAccess, PtBr) => "acesso inválido à memória",
-            (RuntimeError::MemAccess, Es) => "acceso inválido a memoria",
-            (RuntimeError::MemAccess, Ru) => "недопустимый доступ к памяти",
-            (RuntimeError::MemAccess, Ro) => "acces nevalid la memorie",
-            (RuntimeError::MemAccess, En) => "invalid memory access",
-        }
+        messages::msg(locale, self.key())
     }
 }
 
@@ -905,18 +864,6 @@ mod tests {
         assert_eq!(map.decode(OP_BOUNDS), Some(OP_BOUNDS));
         // Endereço fora da tabela e fora da faixa → None.
         assert_eq!(map.decode(0x9999), None);
-    }
-
-    #[test]
-    fn locale_resolves_by_prefix() {
-        assert_eq!(Locale::from_str("pt-BR"), Locale::PtBr);
-        assert_eq!(Locale::from_str("PT"), Locale::PtBr); // case-insensitive
-        assert_eq!(Locale::from_str("es"), Locale::Es);
-        assert_eq!(Locale::from_str("ru-RU"), Locale::Ru);
-        assert_eq!(Locale::from_str("ro"), Locale::Ro);
-        assert_eq!(Locale::from_str("en-US"), Locale::En);
-        assert_eq!(Locale::from_str("zh"), Locale::En); // desconhecido → inglês
-        assert_eq!(Locale::default(), Locale::En);
     }
 
     #[test]

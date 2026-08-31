@@ -73,7 +73,7 @@ impl SampPlugin for Debugger {
         // Idioma das mensagens de erro, do locale do editor (propagado pelo
         // adaptador). Ausente/desconhecido → inglês.
         if let Ok(loc) = std::env::var("PAWNPRO_DBG_LOCALE") {
-            hook::set_locale(crate::runtime_error::Locale::from_str(&loc));
+            hook::set_locale(crate::runtime_error::Locale::from_tag(&loc));
         }
 
         // Carrega o bloco de debug do `.amx`, se o caminho foi informado, para a

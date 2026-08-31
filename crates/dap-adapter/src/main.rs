@@ -6,7 +6,6 @@
 //! recebe eventos do plugin (socket local) e os escreve como eventos DAP no stdout.
 
 mod expr;
-mod l10n;
 mod messages;
 mod plugin_client;
 mod protocol;

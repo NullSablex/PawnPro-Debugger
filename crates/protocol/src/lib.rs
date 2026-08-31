@@ -12,6 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod messages;
 pub mod transport;
 
 /// Modo de step pedido pelo adaptador.

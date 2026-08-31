@@ -9,7 +9,8 @@ use pawnpro_dbg_protocol::{Breakpoint, Command, DataWatch, Step};
 use samp_sdk::debug::AmxDbg;
 use serde_json::{Value, json};
 
-use crate::l10n::{Locale, Msg};
+use pawnpro_dbg_protocol::messages::{self, Locale, MsgKey};
+
 use crate::messages::{Event, Request, Response};
 
 /// Mensagem de saída do `session`. Mantém o `session` puro: ele decide, o
@@ -140,8 +141,8 @@ impl Session {
             .arguments
             .get("locale")
             .and_then(Value::as_str)
-            .map_or_else(Locale::default, Locale::from_code);
-        let runtime_label = Msg::RuntimeErrorsLabel.text(self.locale);
+            .map_or_else(Locale::default, Locale::from_tag);
+        let runtime_label = messages::msg(self.locale, MsgKey::RuntimeErrorsLabel);
         // Capabilities mínimas da v1.
         let caps = json!({
             "supportsConfigurationDoneRequest": true,
@@ -549,7 +550,7 @@ impl Session {
         // bool = 0/1); `shown` é o texto amigável que volta para o painel.
         let seq = self.next_seq();
         let Some((value, shown)) = parse_set_value(&raw) else {
-            let detail = Msg::InvalidValue(&raw).text(self.locale);
+            let detail = messages::format(self.locale, MsgKey::InvalidValue, &[&raw]);
             return vec![Outgoing::Response(Response::fail(seq, req, detail))];
         };
 
@@ -558,7 +559,7 @@ impl Session {
         if let Some((frame, var_index)) = decode_array_ref(reference) {
             let vars = crate::plugin_client::frame_vars(frame);
             let (Some(arr), Some(i)) = (vars.get(var_index), parse_elem_index(&name)) else {
-                let detail = Msg::InvalidElement(&name).text(self.locale);
+                let detail = messages::format(self.locale, MsgKey::InvalidElement, &[&name]);
                 return vec![Outgoing::Response(Response::fail(seq, req, detail))];
             };
             let array_name = arr.name.clone();
@@ -583,7 +584,7 @@ impl Session {
             .iter()
             .any(|v| v.name == name && !v.children.is_empty());
         if is_array {
-            let detail = Msg::ArrayEditElement(&name).text(self.locale);
+            let detail = messages::format(self.locale, MsgKey::ArrayEditElement, &[&name, &name]);
             return vec![Outgoing::Response(Response::fail(seq, req, detail))];
         }
 
@@ -730,9 +731,9 @@ impl Session {
             vec![Outgoing::Response(Response::ok(seq, req, body))]
         } else {
             let detail = if expr.is_empty() {
-                Msg::EmptyExpression.text(self.locale)
+                messages::format(self.locale, MsgKey::EmptyExpression, &[])
             } else {
-                Msg::CannotEvaluate(expr).text(self.locale)
+                messages::format(self.locale, MsgKey::CannotEvaluate, &[expr])
             };
             vec![Outgoing::Response(Response::fail(seq, req, detail))]
         }
