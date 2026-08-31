@@ -19,7 +19,7 @@ desenvolvimento.
 | Pausar em erro de runtime | ✅ | Divisão por zero e índice fora do limite; pausa na linha, antes do abort. SA-MP e open.mp. |
 | Mensagens localizadas | ✅ | pt-BR, en, es, ro, ru (segue o idioma do editor). |
 | Call stack multi-frame | ✅ | Caminha a cadeia de frames (FRM→retorno); nome da função, linha e variáveis por frame. |
-| Data breakpoints | ⬜ | Pausar quando uma variável muda — em avaliação. |
+| Data breakpoints | ✅ | Pausar quando uma variável muda (globais e locais); locais expiram ao retornar o frame. |
 | Mais erros de runtime | ⬜ | STACKERR / MEMACCESS / HEAPLOW — em avaliação. |
 
 ## Estrutura (workspace Cargo)

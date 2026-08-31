@@ -17,13 +17,14 @@ use samp::prelude::Amx;
 
 use crate::bridge::BRIDGE;
 use crate::control::{
-    Bp, BreakAction, Controller, StepMode, StopReason, eval_condition, interpolate_log,
+    Bp, BreakAction, Controller, DataWatch, StepMode, StopReason, eval_condition, interpolate_log,
 };
 use crate::gate::Resume;
 use crate::inspect::{self, CellReader};
 use crate::runtime_error::{self, Locale, OP_NUM_OPCODES, OpcodeMap};
 use crate::stack;
 use pawnpro_dbg_protocol::{Breakpoint, Event, Frame};
+use samp::debug::VClass;
 
 /// Size (bytes) of an AMX instruction — the `cip` in the hook points to the cell
 /// following the `OP_BREAK`; we step this back to get the line address.
@@ -97,6 +98,17 @@ pub fn on_break(amx: &Amx) {
         }
         let locale = LOCALE.lock().map(|g| *g).unwrap_or_default();
         on_pause(amx, cip, frm, "exception", Some(err.message(locale)));
+        return;
+    }
+
+    // Data breakpoints: pausa se uma variável observada mudou de valor desde a
+    // última linha. Verificado antes do breakpoint/step (é uma causa distinta de
+    // parada); watches de locais expiram quando o frame dono retorna.
+    if let Some(name) = check_data_watch(amx, cip, frm) {
+        if let Ok(mut ctrl) = STATE.lock() {
+            ctrl.hit_breakpoint();
+        }
+        on_pause(amx, cip, frm, "data breakpoint", Some(&name));
         return;
     }
 
@@ -259,6 +271,26 @@ fn detect_runtime_error(amx: &Amx, at: u32) -> Option<runtime_error::RuntimeErro
     runtime_error::scan_line(at, pri, alt, frm, &read_code, &read_data, &decode)
 }
 
+/// Verifica os data breakpoints neste passo: devolve o nome da variável observada
+/// que mudou de valor (e deve pausar), ou `None`. Barato quando não há watch
+/// armado. Para expirar watches de locais, calcula os `frm` vivos caminhando a
+/// pilha ([`stack::walk`]) — um frame cujo `frm` sumiu retornou.
+fn check_data_watch(amx: &Amx, cip: u32, frm: i32) -> Option<String> {
+    // Sem watches: não paga o custo de caminhar a pilha.
+    if !STATE.lock().ok()?.has_data_watches() {
+        return None;
+    }
+    let stp = amx.stp().unwrap_or(0);
+    let live: Vec<i32> = stack::walk(cip, frm, stp, |a| amx.read_cell(a))
+        .into_iter()
+        .map(|(_, f)| f)
+        .collect();
+    STATE
+        .lock()
+        .ok()?
+        .check_data_watches(|a| amx.read_cell(a), |f| live.contains(&f))
+}
+
 /// Updates the breakpoints (address + optional condition) resolved by the
 /// adapter.
 pub fn set_breakpoints(bps: Vec<Breakpoint>) {
@@ -271,6 +303,58 @@ pub fn set_breakpoints(bps: Vec<Breakpoint>) {
             hits: 0,
         }));
     }
+}
+
+/// Arma os data breakpoints pedidos pelo adaptador. Resolve cada `(frame, name)`
+/// contra a pausa atual (o frame dá `cip`/`frm`; o símbolo em escopo dá o endereço
+/// de dados e a classe global/local) e passa os watches resolvidos ao controlador.
+/// Chamado pela thread do socket enquanto a VM está pausada.
+pub fn set_data_breakpoints(reqs: Vec<pawnpro_dbg_protocol::DataWatch>) {
+    let resolved = resolve_data_watches(reqs);
+    if let Ok(mut ctrl) = STATE.lock() {
+        ctrl.set_data_watches(resolved);
+    }
+}
+
+/// Resolve os pedidos `(frame, name)` em [`DataWatch`]s com endereço absoluto,
+/// classe (global → nunca expira; local → expira com o frame) e valor inicial.
+/// Usa o contexto da pausa atual ([`PAUSE_CTX`]) e o bloco de debug. Símbolos que
+/// não estão em escopo ou são arrays são ignorados (arrays ainda não observáveis).
+fn resolve_data_watches(reqs: Vec<pawnpro_dbg_protocol::DataWatch>) -> Vec<DataWatch> {
+    let Some((amx_usize, frames)) = PAUSE_CTX.lock().ok().and_then(|g| g.clone()) else {
+        return Vec::new();
+    };
+    // Reconstrói um `Amx` sobre a VM pausada só para ler as células iniciais.
+    let amx = Amx::new(amx_usize as *mut samp::raw::types::AMX, 0);
+    let Ok(guard) = DBG.lock() else {
+        return Vec::new();
+    };
+    let Some(dbg) = guard.as_ref() else {
+        return Vec::new();
+    };
+    reqs.into_iter()
+        .filter_map(|req| {
+            let (cip, frm) = *frames.get(req.frame)?;
+            let sym = dbg
+                .symbols_in_scope(cip)
+                .into_iter()
+                .find(|s| s.name == req.name)?;
+            if sym.is_array() {
+                return None; // observar arrays ainda não é suportado
+            }
+            let addr = sym.effective_address(frm);
+            // Global: endereço absoluto, nunca expira. Local: relativo ao frame,
+            // expira quando o frame `frm` retorna.
+            let frame_frm = (sym.vclass != VClass::Global).then_some(frm);
+            let last = amx.read_cell(addr).unwrap_or(0);
+            Some(DataWatch {
+                addr,
+                frame_frm,
+                last,
+                name: req.name,
+            })
+        })
+        .collect()
 }
 
 /// Edits a simple variable in scope in the given stack `frame` (0 = top) at the

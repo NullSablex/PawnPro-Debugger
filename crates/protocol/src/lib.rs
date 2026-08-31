@@ -65,6 +65,19 @@ pub enum Command {
         name: String,
         value: i32,
     },
+    /// Substitui o conjunto de data breakpoints (pausar quando uma variável muda).
+    /// Cada alvo vem como frame + nome porque só o plugin sabe o `frm`/endereço
+    /// para resolvê-lo; enviado enquanto a VM está pausada (o editor arma o data
+    /// breakpoint a partir do painel Variáveis).
+    SetDataBreakpoints { watches: Vec<DataWatch> },
+}
+
+/// Um data breakpoint pedido: a variável `name` em escopo no frame `frame`
+/// (0 = topo). O plugin resolve o endereço de dados e passa a observar mudanças.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataWatch {
+    pub frame: usize,
+    pub name: String,
 }
 
 /// Evento do plugin para o adaptador.
@@ -150,6 +163,23 @@ mod tests {
             },
             Command::Continue,
             Command::Step { mode: Step::Over },
+            Command::SetVariable {
+                frame: 1,
+                name: "x".into(),
+                value: 7,
+            },
+            Command::SetDataBreakpoints {
+                watches: vec![
+                    DataWatch {
+                        frame: 0,
+                        name: "health".into(),
+                    },
+                    DataWatch {
+                        frame: 2,
+                        name: "g_placar".into(),
+                    },
+                ],
+            },
         ] {
             let line = to_line(&cmd).unwrap();
             assert!(line.ends_with('\n'));

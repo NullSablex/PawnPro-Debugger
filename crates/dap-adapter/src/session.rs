@@ -5,7 +5,7 @@
 //! mapear linha ↔ endereço. A conexão com o plugin do servidor (Componente 2)
 //! ainda não existe; por ora os breakpoints são só resolvidos a endereço.
 
-use pawnpro_dbg_protocol::{Breakpoint, Command, Step};
+use pawnpro_dbg_protocol::{Breakpoint, Command, DataWatch, Step};
 use samp_sdk::debug::AmxDbg;
 use serde_json::{Value, json};
 
@@ -107,6 +107,8 @@ impl Session {
             "scopes" => self.on_scopes(req),
             "variables" => self.on_variables(req),
             "setVariable" => self.on_set_variable(req),
+            "dataBreakpointInfo" => self.on_data_breakpoint_info(req),
+            "setDataBreakpoints" => self.on_set_data_breakpoints(req),
             "evaluate" => self.on_evaluate(req),
             "disconnect" | "terminate" => self.on_disconnect(req),
             "restart" => self.on_restart(req),
@@ -138,6 +140,9 @@ impl Session {
             "supportsLogPoints": true,
             // Editar variável no painel Variáveis durante a pausa.
             "supportsSetVariable": true,
+            // Data breakpoints: pausar quando uma variável muda de valor
+            // ("Break on Value Change" no painel Variáveis).
+            "supportsDataBreakpoints": true,
             // NÃO declaramos `supportsRestartRequest`: assim o editor faz o
             // restart como disconnect + novo launch, que passa pelo nosso fluxo
             // (derruba o servidor antigo, espera a porta, sobe um novo) — o único
@@ -467,6 +472,66 @@ impl Session {
         ]
     }
 
+    /// `dataBreakpointInfo`: o editor pergunta se dá para observar mudanças na
+    /// variável `name` do escopo (`variablesReference` = frame). Respondemos um
+    /// `dataId` opaco (`"frame:name"`) que o `setDataBreakpoints` seguinte reusa;
+    /// `dataId: null` recusa (variável fora do cache do frame). Não persiste entre
+    /// sessões (locais dependem do frame) e observamos escrita (mudança de valor).
+    fn on_data_breakpoint_info(&mut self, req: &Request) -> Vec<Outgoing> {
+        let frame = frame_index(req.arguments.get("variablesReference"));
+        let name = req
+            .arguments
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+
+        // Só oferece se a variável está no cache do frame e não é array (arrays
+        // ainda não observáveis) — evita armar um watch que o plugin recusaria.
+        let var = crate::plugin_client::frame_vars(frame)
+            .into_iter()
+            .find(|v| v.name == name);
+        let observable = var
+            .as_ref()
+            .is_some_and(|v| !v.value.trim_start().starts_with('['));
+
+        let body = if observable {
+            json!({
+                "dataId": format!("{frame}:{name}"),
+                "description": name,
+                "accessTypes": ["write"],
+                "canPersist": false,
+            })
+        } else {
+            // dataId null = não observável (o editor desabilita a opção).
+            json!({ "dataId": Value::Null, "description": name })
+        };
+        self.reply(req, body)
+    }
+
+    /// `setDataBreakpoints`: substitui o conjunto de data breakpoints. Decodifica
+    /// cada `dataId` (`"frame:name"`) de volta em frame + nome e encaminha ao
+    /// plugin, que resolve o endereço e passa a observar. Responde verificado.
+    fn on_set_data_breakpoints(&mut self, req: &Request) -> Vec<Outgoing> {
+        let watches: Vec<DataWatch> = req
+            .arguments
+            .get("breakpoints")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|b| parse_data_id(b.get("dataId")?.as_str()?))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let verified: Vec<Value> = watches
+            .iter()
+            .map(|_| json!({ "verified": true }))
+            .collect();
+        let body = json!({ "breakpoints": verified });
+        self.reply_with(req, Command::SetDataBreakpoints { watches }, body)
+    }
+
     /// `evaluate`: usado pelo painel INSPEÇÃO (watch) e pelo hover. Avalia uma
     /// expressão simples — por ora, o NOME de uma variável em escopo — buscando
     /// nas variáveis da última pausa. Expressões compostas ainda não são
@@ -560,6 +625,17 @@ fn frame_index(reference: Option<&Value>) -> usize {
         .and_then(Value::as_i64)
         .and_then(|r| usize::try_from(r - 1).ok())
         .unwrap_or(0)
+}
+
+/// Decodifica um `dataId` (`"frame:name"`, montado no `dataBreakpointInfo`) de
+/// volta em um [`DataWatch`]. O `name` pode conter `:`, então só o primeiro
+/// separador conta.
+fn parse_data_id(data_id: &str) -> Option<DataWatch> {
+    let (frame, name) = data_id.split_once(':')?;
+    Some(DataWatch {
+        frame: frame.parse().ok()?,
+        name: name.to_string(),
+    })
 }
 
 /// Anexa `source` (se houver) a um frame do `stackTrace`, para o editor ancorar a
@@ -806,6 +882,56 @@ mod tests {
         assert_eq!(frame_index(Some(&json!(3))), 2);
         assert_eq!(frame_index(None), 0);
         assert_eq!(frame_index(Some(&json!(0))), 0); // inválido → topo
+    }
+
+    #[test]
+    fn parse_data_id_splits_frame_and_name() {
+        assert_eq!(
+            parse_data_id("0:health"),
+            Some(DataWatch {
+                frame: 0,
+                name: "health".into()
+            })
+        );
+        // Nome com ':' — só o primeiro separador conta.
+        assert_eq!(
+            parse_data_id("2:a:b"),
+            Some(DataWatch {
+                frame: 2,
+                name: "a:b".into()
+            })
+        );
+        // Sem separador ou frame não-numérico → None.
+        assert_eq!(parse_data_id("semdoispontos"), None);
+        assert_eq!(parse_data_id("x:health"), None);
+    }
+
+    #[test]
+    fn set_data_breakpoints_forwards_watches() {
+        let mut s = Session::new();
+        let args = json!({
+            "breakpoints": [ { "dataId": "1:health" }, { "dataId": "0:g_placar" } ]
+        });
+        let out = s.handle(&req("setDataBreakpoints", &args));
+        // Encaminha os dois watches decodificados ao plugin.
+        assert!(has_command(
+            &out,
+            |c| matches!(c, Command::SetDataBreakpoints { watches }
+            if watches.len() == 2
+                && watches[0] == DataWatch { frame: 1, name: "health".into() }
+                && watches[1] == DataWatch { frame: 0, name: "g_placar".into() })
+        ));
+        // E responde os dois como verificados.
+        let bps = first_response(&out).body["breakpoints"].as_array().unwrap();
+        assert_eq!(bps.len(), 2);
+        assert_eq!(bps[0]["verified"], true);
+    }
+
+    #[test]
+    fn initialize_advertises_data_breakpoints() {
+        let mut s = Session::new();
+        let out = s.handle(&req("initialize", &Value::Null));
+        assert_eq!(first_response(&out).body["supportsDataBreakpoints"], true);
     }
 
     #[test]

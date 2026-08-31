@@ -176,5 +176,6 @@ fn apply(cmd: Command) {
             // não houver pausa ou a variável não for editável).
             let _ = crate::hook::set_variable(frame, &name, value);
         }
+        Command::SetDataBreakpoints { watches } => crate::hook::set_data_breakpoints(watches),
     }
 }

@@ -49,6 +49,19 @@ pub struct Bp {
     pub hits: u32,
 }
 
+/// Um data breakpoint resolvido: o endereço absoluto de dados a observar, o último
+/// valor visto e o nome (para a mensagem). `frame_frm` guarda o `frm` do frame
+/// dono quando a variável é **local** — o watch expira quando esse frame retorna
+/// (o slot da pilha é reusado); variáveis **globais** têm `frame_frm: None` e nunca
+/// expiram.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataWatch {
+    pub addr: i32,
+    pub frame_frm: Option<i32>,
+    pub last: i32,
+    pub name: String,
+}
+
 /// O que fazer ao atingir um endereço, decidido por [`Controller::on_hit`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BreakAction {
@@ -66,6 +79,8 @@ pub enum BreakAction {
 pub struct Controller {
     /// Breakpoints resolvidos. São poucos; `Vec` basta.
     breakpoints: Vec<Bp>,
+    /// Data breakpoints resolvidos (endereço + último valor). Ver [`DataWatch`].
+    data_watches: Vec<DataWatch>,
     mode: StepMode,
     /// `frm` no instante em que um step foi pedido — referência para over/out.
     step_frame: i32,
@@ -85,6 +100,7 @@ impl Controller {
     pub const fn new_const() -> Self {
         Self {
             breakpoints: Vec::new(),
+            data_watches: Vec::new(),
             mode: StepMode::Run,
             step_frame: 0,
             started: false,
@@ -125,6 +141,48 @@ impl Controller {
             Some(msg) => BreakAction::Log(msg.clone()),
             None => BreakAction::Pause,
         }
+    }
+
+    /// Substitui o conjunto de data breakpoints (já resolvidos a endereço + valor
+    /// inicial pelo hook, que tem a VM).
+    pub fn set_data_watches(&mut self, watches: Vec<DataWatch>) {
+        self.data_watches = watches;
+    }
+
+    /// Verifica os data breakpoints neste passo. `read_cell` lê a célula atual de
+    /// um endereço de dados; `is_frm_live` diz se o frame dono (por `frm`) ainda
+    /// está vivo na pilha — watches de locais cujo frame retornou são descartados
+    /// (o slot foi reusado, observá-lo daria falso-positivo). Devolve o nome da
+    /// primeira variável que mudou (e portanto deve pausar), já atualizando o
+    /// último valor; `None` se nada mudou.
+    ///
+    /// `&mut self` porque atualiza o último valor observado e poda watches mortos.
+    #[must_use]
+    pub fn check_data_watches(
+        &mut self,
+        read_cell: impl Fn(i32) -> Option<i32>,
+        is_frm_live: impl Fn(i32) -> bool,
+    ) -> Option<String> {
+        // Expira watches de locais cujo frame retornou (globais têm `frame_frm`
+        // `None` e permanecem).
+        self.data_watches
+            .retain(|w| w.frame_frm.is_none_or(&is_frm_live));
+        for w in &mut self.data_watches {
+            let Some(cur) = read_cell(w.addr) else {
+                continue;
+            };
+            if cur != w.last {
+                w.last = cur;
+                return Some(w.name.clone());
+            }
+        }
+        None
+    }
+
+    /// Há algum data breakpoint armado? (o hook evita o trabalho de checagem se não.)
+    #[must_use]
+    pub fn has_data_watches(&self) -> bool {
+        !self.data_watches.is_empty()
     }
 
     /// Define o modo de step, capturando o frame atual como referência.
@@ -603,5 +661,85 @@ mod tests {
     fn run_mode_never_stops_without_breakpoint() {
         let mut c = Controller::new();
         assert_eq!(c.should_stop(123, 100), None);
+    }
+
+    /// Helper: watch global (nunca expira) num endereço com valor inicial.
+    fn global_watch(addr: i32, name: &str, last: i32) -> DataWatch {
+        DataWatch {
+            addr,
+            frame_frm: None,
+            last,
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn data_watch_detects_change_once() {
+        let mut c = Controller::new();
+        c.set_data_watches(vec![global_watch(200, "g", 5)]);
+        // Valor mudou de 5 → 9: dispara e atualiza o último.
+        assert_eq!(
+            c.check_data_watches(|a| (a == 200).then_some(9), |_| true),
+            Some("g".to_string())
+        );
+        // Mesmo valor (9) agora: não dispara de novo.
+        assert_eq!(
+            c.check_data_watches(|a| (a == 200).then_some(9), |_| true),
+            None
+        );
+    }
+
+    #[test]
+    fn data_watch_no_change_is_silent() {
+        let mut c = Controller::new();
+        c.set_data_watches(vec![global_watch(200, "g", 5)]);
+        assert_eq!(
+            c.check_data_watches(|a| (a == 200).then_some(5), |_| true),
+            None
+        );
+    }
+
+    #[test]
+    fn data_watch_unreadable_address_does_not_fire() {
+        let mut c = Controller::new();
+        c.set_data_watches(vec![global_watch(200, "g", 5)]);
+        // Endereço inacessível (None) → conservador, não inventa mudança.
+        assert_eq!(c.check_data_watches(|_| None, |_| true), None);
+    }
+
+    #[test]
+    fn data_watch_local_expires_when_frame_returns() {
+        let mut c = Controller::new();
+        // Local no frame frm=500; valor "mudaria" para 9.
+        c.set_data_watches(vec![DataWatch {
+            addr: 496,
+            frame_frm: Some(500),
+            last: 5,
+            name: "x".to_string(),
+        }]);
+        // Frame 500 já retornou (não está vivo): o watch é descartado e não dispara,
+        // mesmo com o slot agora contendo outro valor.
+        assert_eq!(
+            c.check_data_watches(|a| (a == 496).then_some(9), |_| false),
+            None
+        );
+        assert!(!c.has_data_watches()); // podado
+    }
+
+    #[test]
+    fn data_watch_local_lives_while_frame_alive() {
+        let mut c = Controller::new();
+        c.set_data_watches(vec![DataWatch {
+            addr: 496,
+            frame_frm: Some(500),
+            last: 5,
+            name: "x".to_string(),
+        }]);
+        // Frame 500 ainda vivo → observa e dispara na mudança.
+        assert_eq!(
+            c.check_data_watches(|a| (a == 496).then_some(9), |frm| frm == 500),
+            Some("x".to_string())
+        );
+        assert!(c.has_data_watches());
     }
 }
