@@ -10,11 +10,11 @@
 | Inspeção de variáveis | :material-check: | int, `Float:`, `bool:`, array, hex — em escopo. |
 | Watch / hover | :material-check: | |
 | Editar variável | :material-check: | Durante a pausa (`setVariable`). |
-| Pausar em erro de runtime | :material-check: | Divisão por zero e índice fora do limite; pausa na linha, antes do abort. SA-MP e open.mp. Ver [Pausa no erro](runtime-errors.md). |
+| Pausar em erro de runtime | :material-check: | Divisão por zero, índice fora do limite, colisão pilha/heap, underflow de heap e acesso inválido à memória; pausa na linha, antes do abort. SA-MP e open.mp. Ver [Pausa no erro](runtime-errors.md). |
 | Mensagens localizadas | :material-check: | pt-BR, en, es, ro, ru (segue o idioma do editor). |
-| Call stack multi-frame | :material-checkbox-blank-outline: | Hoje mostra um frame; caminhar a pilha está planejado. |
-| Data breakpoints | :material-checkbox-blank-outline: | Pausar quando uma variável muda — em avaliação. |
-| Mais erros de runtime | :material-checkbox-blank-outline: | STACKERR / MEMACCESS / HEAPLOW — em avaliação. |
+| Call stack multi-frame | :material-check: | Caminha a cadeia de frames (FRM→retorno); nome da função, linha e variáveis por frame. |
+| Data breakpoints | :material-check: | Pausar quando uma variável muda (globais e locais); locais expiram ao retornar o frame. |
+| Mais erros de runtime | :material-check: | STACKERR (colisão pilha/heap), HEAPLOW (underflow de heap) e MEMACCESS (acesso inválido) — simulação fiel ao `amx.c`, conservadora. |
 
 ## Breakpoints condicionais
 

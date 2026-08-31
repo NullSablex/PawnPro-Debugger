@@ -13,7 +13,7 @@ open.mp.
 
 - **[Começando](getting-started.md)** — baixar o plugin, colocá-lo no servidor e
   iniciar uma sessão de depuração.
-- **[Recursos](features.md)** — o que o debugger faz (e o que está planejado).
+- **[Recursos](features.md)** — o que o debugger faz.
 
 Para entender por dentro, veja **[Arquitetura](architecture.md)** e **[Como
 funciona a pausa no erro](runtime-errors.md)**.
