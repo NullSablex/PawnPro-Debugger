@@ -19,7 +19,7 @@ pub trait CellReader {
 pub fn collect(dbg: &AmxDbg, reader: &impl CellReader, cip: u32, frm: i32) -> Vec<Var> {
     let mut out = Vec::new();
     for sym in dbg.symbols_in_scope(cip) {
-        // Effective data-segment address (global vs frame-relative) via the SDK.
+        // Endereço efetivo no data segment (global ou relativo ao frame), via SDK.
         let addr = sym.effective_address(frm);
         out.push(if sym.is_array() {
             build_array(sym, addr, reader, dbg)

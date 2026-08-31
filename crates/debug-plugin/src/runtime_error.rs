@@ -200,17 +200,12 @@ fn is_control_barrier(op: i32) -> bool {
 /// registradores a partir do estado real no break, até detectar um erro de runtime
 /// ou chegar ao fim da linha.
 ///
-/// - `pri0`/`alt0`/`frm`/`stk0`/`hea0`: registradores da VM no break. `stk`/`hea`
-///   são rastreados ao longo da linha para detectar colisão pilha/heap (STACKERR),
-///   underflow de heap (HEAPLOW) e acesso inválido à memória (MEMACCESS), com as
-///   MESMAS condições do `amx.c` (`CHKMARGIN`/`CHKHEAP`/`VERIFYADDRESS`).
-/// - `hlw`/`stp`: fundo do heap e topo da pilha (limites), para HEAPLOW/MEMACCESS.
-/// - `read_code`/`read_data`/`decode`: leem o code/data segment e traduzem opcodes.
+/// Os registradores vêm do estado real no break; `stk`/`hea` são rastreados ao
+/// longo da linha e checados com as MESMAS condições do `amx.c`
+/// (`CHKMARGIN`/`CHKHEAP`/`VERIFYADDRESS`).
 ///
 /// Para no próximo `OP_BREAK`, num opcode de tamanho variável, ou quando algo não
-/// decodifica. As checagens de STACKERR/HEAPLOW/MEMACCESS só ocorrem enquanto o
-/// rastreio de `stk`/`hea` (e do registrador de endereço) é confiável — qualquer
-/// desvio/opcode não modelado as desliga, nunca produzindo um falso-positivo.
+/// decodifica. Ver [`is_control_barrier`] para quando as checagens se desligam.
 #[expect(clippy::too_many_arguments, clippy::too_many_lines)]
 #[must_use]
 pub fn scan_line(

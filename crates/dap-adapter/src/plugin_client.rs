@@ -170,8 +170,8 @@ impl PluginClient {
                             "threadId": 1,
                             "allThreadsStopped": true,
                         });
-                        // Runtime error: `description`/`text` show the cause in the
-                        // editor's call-stack header (reason "exception").
+                        // Erro de runtime: `description`/`text` mostram a causa
+                        // no cabeçalho da call stack do editor (reason "exception").
                         if let Some(desc) = description {
                             body["description"] = json!(desc);
                             body["text"] = json!(desc);

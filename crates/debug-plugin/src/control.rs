@@ -118,8 +118,6 @@ impl Controller {
     /// só é chamado se houver `condition`. A ordem segue o DAP: primeiro a
     /// condição lógica filtra, depois o acerto conta para o hit-count, e por fim
     /// `log_message` decide entre pausar e registrar.
-    ///
-    /// `&mut self` porque o contador de acertos do breakpoint é atualizado aqui.
     pub fn on_hit(&mut self, cip: u32, eval: impl FnOnce(&str) -> bool) -> BreakAction {
         let Some(bp) = self.breakpoints.iter_mut().find(|b| b.addr == cip) else {
             return BreakAction::None;
@@ -155,8 +153,6 @@ impl Controller {
     /// (o slot foi reusado, observá-lo daria falso-positivo). Devolve o nome da
     /// primeira variável que mudou (e portanto deve pausar), já atualizando o
     /// último valor; `None` se nada mudou.
-    ///
-    /// `&mut self` porque atualiza o último valor observado e poda watches mortos.
     #[must_use]
     pub fn check_data_watches(
         &mut self,

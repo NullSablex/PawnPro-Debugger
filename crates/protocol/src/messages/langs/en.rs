@@ -1,4 +1,4 @@
-//! English (en) — the source language / fallback.
+//! Inglês (en) — idioma-fonte e fallback dos demais.
 
 use crate::messages::MsgKey;
 
