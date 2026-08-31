@@ -9,6 +9,7 @@ use pawnpro_dbg_protocol::{Breakpoint, Command, DataWatch, Step};
 use samp_sdk::debug::AmxDbg;
 use serde_json::{Value, json};
 
+use crate::l10n::{Locale, Msg};
 use crate::messages::{Event, Request, Response};
 
 /// Mensagem de saída do `session`. Mantém o `session` puro: ele decide, o
@@ -61,6 +62,8 @@ pub struct Session {
     /// `setBreakpoints`). Usado no `stackTrace` para o frame apontar à fonte —
     /// senão o editor mostra "Origem Desconhecida".
     source_path: Option<String>,
+    /// Idioma das mensagens do adaptador, do `locale` do `initialize`.
+    locale: Locale,
     terminated: bool,
 }
 
@@ -130,6 +133,14 @@ impl Session {
     }
 
     fn on_initialize(&mut self, req: &Request) -> Vec<Outgoing> {
+        // O cliente informa o idioma no `initialize`; guardamos para localizar as
+        // mensagens do adaptador (o plugin recebe o seu próprio via `launch`).
+        self.locale = req
+            .arguments
+            .get("locale")
+            .and_then(Value::as_str)
+            .map_or_else(Locale::default, Locale::from_code);
+        let runtime_label = Msg::RuntimeErrorsLabel.text(self.locale);
         // Capabilities mínimas da v1.
         let caps = json!({
             "supportsConfigurationDoneRequest": true,
@@ -153,7 +164,7 @@ impl Session {
             "supportsFunctionBreakpoints": true,
             // Filtro de exceção: o editor liga/desliga a pausa em erros de runtime.
             "exceptionBreakpointFilters": [
-                { "filter": "runtime", "label": "Erros de runtime", "default": true }
+                { "filter": "runtime", "label": runtime_label, "default": true }
             ],
             // NÃO declaramos `supportsRestartRequest`: assim o editor faz o
             // restart como disconnect + novo launch, que passa pelo nosso fluxo
@@ -535,13 +546,8 @@ impl Session {
         // bool = 0/1); `shown` é o texto amigável que volta para o painel.
         let seq = self.next_seq();
         let Some((value, shown)) = parse_set_value(&raw) else {
-            return vec![Outgoing::Response(Response::fail(
-                seq,
-                req,
-                format!(
-                    "valor inválido: '{raw}' (use inteiro, ex.: 100/0x64; float, ex.: 1.5; ou true/false)"
-                ),
-            ))];
+            let detail = Msg::InvalidValue(&raw).text(self.locale);
+            return vec![Outgoing::Response(Response::fail(seq, req, detail))];
         };
 
         // Edição de ELEMENTO de array: o `variablesReference` é o do array e o
@@ -549,11 +555,8 @@ impl Session {
         if let Some((frame, var_index)) = decode_array_ref(reference) {
             let vars = crate::plugin_client::frame_vars(frame);
             let (Some(arr), Some(i)) = (vars.get(var_index), parse_elem_index(&name)) else {
-                return vec![Outgoing::Response(Response::fail(
-                    seq,
-                    req,
-                    format!("elemento inválido: '{name}'"),
-                ))];
+                let detail = Msg::InvalidElement(&name).text(self.locale);
+                return vec![Outgoing::Response(Response::fail(seq, req, detail))];
             };
             let array_name = arr.name.clone();
             crate::plugin_client::update_array_elem(frame, var_index, i, &shown);
@@ -577,11 +580,8 @@ impl Session {
             .iter()
             .any(|v| v.name == name && !v.children.is_empty());
         if is_array {
-            return vec![Outgoing::Response(Response::fail(
-                seq,
-                req,
-                format!("'{name}' é um array; expanda e edite um elemento (ex.: {name}[0])"),
-            ))];
+            let detail = Msg::ArrayEditElement(&name).text(self.locale);
+            return vec![Outgoing::Response(Response::fail(seq, req, detail))];
         }
 
         // Resposta otimista: a edição quase sempre vale (variável simples em
@@ -697,9 +697,9 @@ impl Session {
             vec![Outgoing::Response(Response::ok(seq, req, body))]
         } else {
             let detail = if expr.is_empty() {
-                "expressão vazia".to_string()
+                Msg::EmptyExpression.text(self.locale)
             } else {
-                format!("não foi possível avaliar '{expr}'")
+                Msg::CannotEvaluate(expr).text(self.locale)
             };
             vec![Outgoing::Response(Response::fail(seq, req, detail))]
         }
