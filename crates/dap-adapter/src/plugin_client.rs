@@ -150,17 +150,14 @@ impl PluginClient {
                 match wire::from_line::<Event>(&line) {
                     Ok(Event::Paused {
                         reason,
-                        line,
-                        vars,
+                        frames,
                         description,
                     }) => {
-                        store_vars(&vars);
-                        store_line(line);
+                        store_frames(&frames);
                         let mut body = json!({
                             "reason": reason,
                             "threadId": 1,
                             "allThreadsStopped": true,
-                            "line": line,
                         });
                         // Runtime error: `description`/`text` show the cause in the
                         // editor's call-stack header (reason "exception").
@@ -204,41 +201,39 @@ impl PluginClient {
     }
 }
 
-/// Últimas variáveis recebidas num `Paused` — servidas ao `variables` do DAP.
-/// Global porque chegam pela thread leitora e são consultadas no loop principal.
-static LAST_VARS: Mutex<Vec<wire::Var>> = Mutex::new(Vec::new());
+/// Pilha de chamadas da última pausa — servida ao `stackTrace`/`scopes`/
+/// `variables` do DAP. Global porque chega pela thread leitora e é consultada no
+/// loop principal. Índice 0 = topo (onde a VM parou).
+static LAST_FRAMES: Mutex<Vec<wire::Frame>> = Mutex::new(Vec::new());
 
-fn store_vars(vars: &[wire::Var]) {
-    if let Ok(mut g) = LAST_VARS.lock() {
-        *g = vars.to_vec();
+fn store_frames(frames: &[wire::Frame]) {
+    if let Ok(mut g) = LAST_FRAMES.lock() {
+        *g = frames.to_vec();
     }
 }
 
-/// Variáveis da última pausa (para o handler `variables` do DAP).
-pub fn last_vars() -> Vec<wire::Var> {
-    LAST_VARS.lock().map(|g| g.clone()).unwrap_or_default()
+/// Frames da última pausa (para o `stackTrace` do DAP).
+pub fn last_frames() -> Vec<wire::Frame> {
+    LAST_FRAMES.lock().map(|g| g.clone()).unwrap_or_default()
 }
 
-/// Atualiza no cache o valor de uma variável editada via `setVariable`, para que
-/// o painel/watch reflitam o novo valor sem reler a VM (o plugin já a escreveu).
-pub fn update_var(name: &str, value: &str) {
-    if let Ok(mut g) = LAST_VARS.lock()
-        && let Some(v) = g.iter_mut().find(|v| v.name == name)
+/// Variáveis em escopo no frame dado (0 = topo) — para `variables`/`evaluate`.
+pub fn frame_vars(frame: usize) -> Vec<wire::Var> {
+    LAST_FRAMES
+        .lock()
+        .ok()
+        .and_then(|g| g.get(frame).map(|f| f.vars.clone()))
+        .unwrap_or_default()
+}
+
+/// Atualiza no cache o valor de uma variável editada via `setVariable` no frame
+/// dado, para que o painel/watch reflitam o novo valor sem reler a VM (o plugin já
+/// a escreveu).
+pub fn update_var(frame: usize, name: &str, value: &str) {
+    if let Ok(mut g) = LAST_FRAMES.lock()
+        && let Some(f) = g.get_mut(frame)
+        && let Some(v) = f.vars.iter_mut().find(|v| v.name == name)
     {
         v.value = value.to_string();
     }
-}
-
-/// Linha-fonte da última pausa (para o `stackTrace` do DAP).
-static LAST_LINE: Mutex<Option<i32>> = Mutex::new(None);
-
-fn store_line(line: Option<i32>) {
-    if let Ok(mut g) = LAST_LINE.lock() {
-        *g = line;
-    }
-}
-
-/// Linha da última pausa, se houver.
-pub fn last_line() -> Option<i32> {
-    LAST_LINE.lock().ok().and_then(|g| *g)
 }

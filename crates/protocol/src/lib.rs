@@ -58,21 +58,26 @@ pub enum Command {
     /// código que roda uma única vez no início (ex.: `OnGameModeInit`).
     Configured,
     /// Edita uma variável em escopo na pausa atual: grava `value` na célula de
-    /// `name`. Só vale enquanto a VM está pausada.
-    SetVariable { name: String, value: i32 },
+    /// `name`. `frame` é o índice do frame da pilha (0 = topo, onde a VM parou),
+    /// para editar a variável no escopo correto. Só vale enquanto a VM está pausada.
+    SetVariable {
+        frame: usize,
+        name: String,
+        value: i32,
+    },
 }
 
 /// Evento do plugin para o adaptador.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "camelCase")]
 pub enum Event {
-    /// A VM pausou. `line` é a linha-fonte (mapeada do `cip`, se possível) e
-    /// `vars` são os símbolos em escopo no momento — enviados junto para evitar
-    /// uma ida-e-volta de inspeção enquanto a VM está bloqueada.
+    /// A VM pausou. `frames` é a pilha de chamadas completa — do topo (frame 0,
+    /// onde a VM parou) até o público de entrada. Cada frame traz sua linha-fonte
+    /// e as variáveis em escopo naquele frame, enviadas junto para evitar
+    /// idas-e-voltas de inspeção enquanto a VM está bloqueada.
     Paused {
         reason: String,
-        line: Option<i32>,
-        vars: Vec<Var>,
+        frames: Vec<Frame>,
         /// Texto descritivo opcional (ex.: mensagem de um erro de runtime quando
         /// `reason == "exception"`). Vira o `description`/`text` do `stopped` DAP.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -90,6 +95,16 @@ pub enum Event {
 pub struct Var {
     pub name: String,
     pub value: String,
+}
+
+/// Um frame da pilha de chamadas na pausa. `name` é o nome da função (resolvido
+/// do bloco de debug pelo endereço), `line` a linha-fonte do frame e `vars` as
+/// variáveis em escopo nele.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Frame {
+    pub name: String,
+    pub line: Option<i32>,
+    pub vars: Vec<Var>,
 }
 
 /// Serializa uma mensagem como uma linha JSON (com `\n` ao final).
@@ -148,17 +163,30 @@ mod tests {
         for ev in [
             Event::Paused {
                 reason: "breakpoint".into(),
-                line: Some(42),
-                vars: vec![Var {
-                    name: "g".into(),
-                    value: "1".into(),
+                frames: vec![Frame {
+                    name: "main".into(),
+                    line: Some(42),
+                    vars: vec![Var {
+                        name: "g".into(),
+                        value: "1".into(),
+                    }],
                 }],
                 description: None,
             },
             Event::Paused {
                 reason: "exception".into(),
-                line: Some(7),
-                vars: vec![],
+                frames: vec![
+                    Frame {
+                        name: "foo".into(),
+                        line: Some(7),
+                        vars: vec![],
+                    },
+                    Frame {
+                        name: "main".into(),
+                        line: Some(20),
+                        vars: vec![],
+                    },
+                ],
                 description: Some("divisão por zero".into()),
             },
             Event::Output { text: "x=5".into() },

@@ -22,7 +22,8 @@ use crate::control::{
 use crate::gate::Resume;
 use crate::inspect::{self, CellReader};
 use crate::runtime_error::{self, Locale, OP_NUM_OPCODES, OpcodeMap};
-use pawnpro_dbg_protocol::{Breakpoint, Event};
+use crate::stack;
+use pawnpro_dbg_protocol::{Breakpoint, Event, Frame};
 
 /// Size (bytes) of an AMX instruction — the `cip` in the hook points to the cell
 /// following the `OP_BREAK`; we step this back to get the line address.
@@ -33,11 +34,17 @@ static STATE: Mutex<Controller> = Mutex::new(Controller::new_const());
 /// Debug block of the `.amx` being debugged (loaded in the plugin's `on_load`).
 static DBG: Mutex<Option<AmxDbg>> = Mutex::new(None);
 
-/// Context of the CURRENT pause (`amx` ptr, `cip`, `frm`), valid only while the
-/// VM is blocked in `on_pause`. The socket thread uses this to apply commands
-/// that need the VM (e.g. editing a variable). `amx` as `usize` to be `Send`
-/// (the VM thread is stopped, so the pointer stays valid during the pause).
-static PAUSE_CTX: Mutex<Option<(usize, u32, i32)>> = Mutex::new(None);
+/// Context of the CURRENT pause: the `amx` ptr plus every stack frame's
+/// `(cip, frm)` (index 0 = top, where the VM stopped). Valid only while the VM is
+/// blocked in `on_pause`. The socket thread uses this to apply commands that need
+/// the VM in a specific frame (e.g. editing a variable in the selected frame).
+/// `amx` as `usize` to be `Send` (the VM thread is stopped, so the pointer stays
+/// valid during the pause).
+static PAUSE_CTX: Mutex<Option<PauseCtx>> = Mutex::new(None);
+
+/// Pause context: the paused `amx` pointer (as `usize`) plus each frame's
+/// `(cip, frm)`, index 0 = top.
+type PauseCtx = (usize, Vec<(u32, i32)>);
 
 /// Opcode map of the loaded VM, to detect a runtime error before it aborts.
 /// `None` until `load_opcode_map` runs (and stays effectively identity for a
@@ -144,24 +151,23 @@ fn reason_str(r: crate::control::StopReason) -> &'static str {
 /// Pause: collects variables in scope, notifies the adapter and blocks until
 /// continue/step. Runs on the VM thread (the server freezes — expected in dev).
 fn on_pause(amx: &Amx, cip: u32, frm: i32, reason: &str, description: Option<&str>) {
-    let (line, vars) = match DBG.lock() {
+    let (frames, ctx) = match DBG.lock() {
         Ok(guard) => match guard.as_ref() {
-            Some(dbg) => (dbg.lookup_line(cip), inspect::collect(dbg, amx, cip, frm)),
-            None => (None, Vec::new()),
+            Some(dbg) => build_frames(dbg, amx, cip, frm),
+            None => (Vec::new(), Vec::new()),
         },
-        Err(_) => (None, Vec::new()),
+        Err(_) => (Vec::new(), Vec::new()),
     };
 
-    // Publish the pause context so the socket thread can edit variables while
-    // the VM is blocked just below.
-    if let (Ok(mut ctx), Some(ptr)) = (PAUSE_CTX.lock(), amx.amx()) {
-        *ctx = Some((ptr.as_ptr() as usize, cip, frm));
+    // Publish the pause context (every frame's cip/frm) so the socket thread can
+    // edit variables in the selected frame while the VM is blocked just below.
+    if let (Ok(mut guard), Some(ptr)) = (PAUSE_CTX.lock(), amx.amx()) {
+        *guard = Some((ptr.as_ptr() as usize, ctx));
     }
 
     BRIDGE.send(&Event::Paused {
         reason: reason.to_string(),
-        line,
-        vars,
+        frames,
         description: description.map(str::to_string),
     });
 
@@ -182,6 +188,25 @@ fn on_pause(amx: &Amx, cip: u32, frm: i32, reason: &str, description: Option<&st
         // `Run` is the post-continue state; the step was already armed above.
         let _ = StepMode::Run;
     }
+}
+
+/// Builds the full call stack at the pause: walks the AMX frame chain and, for
+/// each frame, resolves the function name/line from the debug block and collects
+/// the variables in scope there. Returns the frames for the protocol plus their
+/// `(cip, frm)` contexts in the same order, so [`set_variable`] can target the
+/// selected frame.
+fn build_frames(dbg: &AmxDbg, amx: &Amx, cip: u32, frm: i32) -> (Vec<Frame>, Vec<(u32, i32)>) {
+    let stp = amx.stp().unwrap_or(0);
+    let ctx = stack::walk(cip, frm, stp, |addr| amx.read_cell(addr));
+    let frames = ctx
+        .iter()
+        .map(|&(fcip, ffrm)| Frame {
+            name: dbg.lookup_function(fcip).unwrap_or("???").to_string(),
+            line: dbg.lookup_line(fcip),
+            vars: inspect::collect(dbg, amx, fcip, ffrm),
+        })
+        .collect();
+    (frames, ctx)
 }
 
 /// Evaluates a breakpoint condition against the variables in scope at the current
@@ -248,14 +273,20 @@ pub fn set_breakpoints(bps: Vec<Breakpoint>) {
     }
 }
 
-/// Edits a simple variable in scope at the current pause: writes `value` to its
-/// cell via the SDK's bounds-checked `Amx::write_cell`. Returns `Some(value)` on
-/// success, `None` if there is no active pause, the variable is not in scope, is
+/// Edits a simple variable in scope in the given stack `frame` (0 = top) at the
+/// current pause: writes `value` to its cell via the SDK's bounds-checked
+/// `Amx::write_cell`. Returns `Some(value)` on success, `None` if there is no
+/// active pause, the frame index is out of range, the variable is not in scope, is
 /// an array (unsupported) or the address is inaccessible. Called by the socket
 /// thread while the VM is paused.
 #[must_use]
-pub fn set_variable(name: &str, value: i32) -> Option<i32> {
-    let (amx_usize, cip, frm) = (*PAUSE_CTX.lock().ok()?)?;
+pub fn set_variable(frame: usize, name: &str, value: i32) -> Option<i32> {
+    let (amx_usize, cip, frm) = {
+        let guard = PAUSE_CTX.lock().ok()?;
+        let (amx_usize, frames) = guard.as_ref()?;
+        let (cip, frm) = *frames.get(frame)?;
+        (*amx_usize, cip, frm)
+    };
     // Reconstruct an `Amx` over the paused VM pointer. `write_cell` reads the
     // base/data segment straight from the AMX struct, so the function table is
     // not needed here (0 is fine).

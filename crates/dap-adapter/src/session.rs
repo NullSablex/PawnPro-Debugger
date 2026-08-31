@@ -335,42 +335,72 @@ impl Session {
         self.reply_with(req, Command::Step { mode }, Value::Null)
     }
 
-    /// `stackTrace`: um único frame na linha onde a VM parou (v1 sem call stack
-    /// completo — o plugin ainda não caminha os frames). O frame inclui `source`
-    /// apontando ao arquivo-fonte; sem isso o editor mostra "Origem Desconhecida"
-    /// e não destaca a linha de execução.
+    /// `stackTrace`: a pilha de chamadas completa da última pausa (frame 0 = topo).
+    /// Cada frame carrega o nome da função, a linha-fonte e um `source` apontando ao
+    /// arquivo — sem isso o editor mostra "Origem Desconhecida" e não destaca a
+    /// linha. O `id` (1-based) identifica o frame nos `scopes`/`variables`/`evaluate`
+    /// seguintes. Antes da primeira pausa (sem frames), devolve um frame-âncora só
+    /// para o editor ter a fonte.
     fn on_stack_trace(&mut self, req: &Request) -> Vec<Outgoing> {
-        let line = crate::plugin_client::last_line().unwrap_or(0);
-        let mut frame = json!({
-            "id": 1,
-            "name": "main",
-            "line": line,
-            "column": 0,
-        });
-        if let Some(path) = self.source_path.as_deref() {
-            frame["source"] = json!({
+        let source = self.source_path.as_deref().map(|path| {
+            json!({
                 "name": std::path::Path::new(path)
                     .file_name()
                     .and_then(|s| s.to_str())
                     .unwrap_or(path),
                 "path": path,
-            });
-        }
-        let body = json!({ "stackFrames": [frame], "totalFrames": 1 });
+            })
+        });
+
+        let frames = crate::plugin_client::last_frames();
+        let stack_frames: Vec<Value> = if frames.is_empty() {
+            // Sem pausa ainda: frame-âncora para ancorar a fonte no editor.
+            vec![with_source(
+                json!({ "id": 1, "name": "main", "line": 0, "column": 0 }),
+                source.as_ref(),
+            )]
+        } else {
+            frames
+                .iter()
+                .enumerate()
+                .map(|(i, f)| {
+                    with_source(
+                        json!({
+                            "id": i + 1,
+                            "name": f.name,
+                            "line": f.line.unwrap_or(0),
+                            "column": 0,
+                        }),
+                        source.as_ref(),
+                    )
+                })
+                .collect()
+        };
+        let total = stack_frames.len();
+        let body = json!({ "stackFrames": stack_frames, "totalFrames": total });
         self.reply(req, body)
     }
 
-    /// `scopes`: um escopo "Locais" com `variablesReference` fixo (1).
+    /// `scopes`: um escopo "Locais" por frame. O `frameId` (vindo do `stackTrace`)
+    /// vira o `variablesReference` do escopo, para o `variables` seguinte saber de
+    /// qual frame ler.
     fn on_scopes(&mut self, req: &Request) -> Vec<Outgoing> {
+        let frame_id = req
+            .arguments
+            .get("frameId")
+            .and_then(Value::as_i64)
+            .unwrap_or(1);
         let body = json!({
-            "scopes": [ { "name": "Locais", "variablesReference": 1, "expensive": false } ]
+            "scopes": [ { "name": "Locais", "variablesReference": frame_id, "expensive": false } ]
         });
         self.reply(req, body)
     }
 
-    /// `variables`: devolve as variáveis da última pausa (recebidas no `Paused`).
+    /// `variables`: variáveis do frame referenciado. O `variablesReference` é o
+    /// `frameId` (1-based) definido no `scopes`; o índice do frame é `ref - 1`.
     fn on_variables(&mut self, req: &Request) -> Vec<Outgoing> {
-        let vars: Vec<Value> = crate::plugin_client::last_vars()
+        let frame = frame_index(req.arguments.get("variablesReference"));
+        let vars: Vec<Value> = crate::plugin_client::frame_vars(frame)
             .into_iter()
             .map(|v| json!({ "name": v.name, "value": v.value, "variablesReference": 0 }))
             .collect();
@@ -395,6 +425,8 @@ impl Session {
             .unwrap_or("")
             .trim()
             .to_string();
+        // O `variablesReference` do escopo identifica o frame (== frameId 1-based).
+        let frame = frame_index(req.arguments.get("variablesReference"));
 
         // Aceita inteiro (decimal/hex), float (`50.0`) e bool (`true`/`false`). O
         // valor enviado ao plugin é sempre uma célula i32 (float = bits IEEE-754,
@@ -413,7 +445,7 @@ impl Session {
         // Arrays não são editáveis (o plugin os rejeita). Detectamos pelo valor
         // atual em cache começar com `[` e falhamos AQUI, em vez de responder um
         // sucesso falso e desencontrar o painel do estado real da VM.
-        let is_array = crate::plugin_client::last_vars()
+        let is_array = crate::plugin_client::frame_vars(frame)
             .iter()
             .any(|v| v.name == name && v.value.trim_start().starts_with('['));
         if is_array {
@@ -427,10 +459,10 @@ impl Session {
         // Resposta otimista: a edição quase sempre vale (variável simples em
         // escopo). O plugin efetiva a escrita; atualizamos o cache local para o
         // painel/watch refletirem o novo valor sem reler a VM.
-        crate::plugin_client::update_var(&name, &shown);
+        crate::plugin_client::update_var(frame, &name, &shown);
         let body = json!({ "value": shown, "variablesReference": 0 });
         vec![
-            Outgoing::ToPlugin(Command::SetVariable { name, value }),
+            Outgoing::ToPlugin(Command::SetVariable { frame, name, value }),
             Outgoing::Response(Response::ok(seq, req, body)),
         ]
     }
@@ -447,9 +479,17 @@ impl Session {
             .and_then(Value::as_str)
             .unwrap_or("")
             .trim();
+        // O `frameId` (1-based, do `stackTrace`) escolhe o escopo; ausente (ex.:
+        // console global) cai no frame do topo.
+        let frame = req
+            .arguments
+            .get("frameId")
+            .and_then(Value::as_i64)
+            .and_then(|id| usize::try_from(id - 1).ok())
+            .unwrap_or(0);
 
-        // Busca exata pelo nome da variável entre as da última pausa.
-        let found = crate::plugin_client::last_vars()
+        // Busca exata pelo nome da variável no frame selecionado.
+        let found = crate::plugin_client::frame_vars(frame)
             .into_iter()
             .find(|v| v.name == expr);
 
@@ -511,6 +551,24 @@ impl Session {
     pub fn set_debug(&mut self, dbg: AmxDbg) {
         self.dbg = Some(dbg);
     }
+}
+
+/// Índice do frame (0-based) a partir de um `variablesReference`/`frameId`
+/// (1-based, como o `stackTrace`/`scopes` definem). Ausente ou inválido → topo (0).
+fn frame_index(reference: Option<&Value>) -> usize {
+    reference
+        .and_then(Value::as_i64)
+        .and_then(|r| usize::try_from(r - 1).ok())
+        .unwrap_or(0)
+}
+
+/// Anexa `source` (se houver) a um frame do `stackTrace`, para o editor ancorar a
+/// linha ao arquivo-fonte.
+fn with_source(mut frame: Value, source: Option<&Value>) -> Value {
+    if let Some(src) = source {
+        frame["source"] = src.clone();
+    }
+    frame
 }
 
 /// Interpreta o texto digitado em `setVariable` e devolve `(célula, texto)`:
@@ -728,6 +786,26 @@ mod tests {
         let out = s.handle(&req("stackTrace", &Value::Null));
         let frame = &first_response(&out).body["stackFrames"][0];
         assert_eq!(frame["source"]["path"], "/srv/gm/molde.pwn");
+    }
+
+    #[test]
+    fn scopes_reference_follows_frame_id() {
+        // O escopo "Locais" referencia o frame pedido (frameId), para o
+        // `variables` seguinte ler daquele frame — e não de um id fixo.
+        let mut s = Session::new();
+        let out = s.handle(&req("scopes", &json!({ "frameId": 3 })));
+        let scope = &first_response(&out).body["scopes"][0];
+        assert_eq!(scope["variablesReference"], 3);
+    }
+
+    #[test]
+    fn frame_index_maps_1based_reference_to_0based() {
+        // variablesReference/frameId são 1-based (id do stackTrace); o índice do
+        // frame é `ref - 1`. Ausente ou inválido cai no topo (0).
+        assert_eq!(frame_index(Some(&json!(1))), 0);
+        assert_eq!(frame_index(Some(&json!(3))), 2);
+        assert_eq!(frame_index(None), 0);
+        assert_eq!(frame_index(Some(&json!(0))), 0); // inválido → topo
     }
 
     #[test]

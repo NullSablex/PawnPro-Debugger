@@ -15,6 +15,7 @@ mod gate;
 mod hook;
 mod inspect;
 mod runtime_error;
+mod stack;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
