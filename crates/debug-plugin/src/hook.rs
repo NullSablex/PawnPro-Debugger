@@ -321,6 +321,63 @@ pub fn set_breakpoints(bps: Vec<Breakpoint>) {
     }
 }
 
+/// Lê `count` bytes da memória de dados a partir da variável `name` (elemento
+/// `index`, se array) no `frame`, mais `offset`, e responde com um
+/// `Event::MemoryData` correlacionado por `id`. Vazio se não resolver/ler.
+pub fn read_memory(
+    id: u64,
+    frame: usize,
+    name: &str,
+    index: Option<usize>,
+    offset: i64,
+    count: usize,
+) {
+    let bytes = read_memory_inner(frame, name, index, offset, count).unwrap_or_default();
+    BRIDGE.send(&Event::MemoryData { id, bytes });
+}
+
+fn read_memory_inner(
+    frame: usize,
+    name: &str,
+    index: Option<usize>,
+    offset: i64,
+    count: usize,
+) -> Option<Vec<u8>> {
+    let (amx_usize, frames) = PAUSE_CTX.lock().ok().and_then(|g| g.clone())?;
+    let amx = Amx::new(amx_usize as *mut samp::raw::types::AMX, 0);
+    let (cip, frm) = *frames.get(frame)?;
+    let guard = DBG.lock().ok()?;
+    let dbg = guard.as_ref()?;
+    let sym = dbg
+        .symbols_in_scope(cip)
+        .into_iter()
+        .find(|s| s.name == name)?;
+    let mut base = sym.effective_address(frm);
+    if let Some(i) = index {
+        if !sym.is_array() {
+            return None;
+        }
+        base = base.wrapping_add(i32::try_from(i).ok()?.wrapping_mul(4));
+    }
+    let start = i32::try_from(i64::from(base) + offset).ok()?;
+
+    // `read_cell` lê cells de 4 bytes alinhadas; alinha para baixo e pula o resto.
+    let aligned = start & !3;
+    let skip = usize::try_from(start - aligned).ok()?;
+    let mut out = Vec::with_capacity(skip + count);
+    let mut addr = aligned;
+    while out.len() < skip + count {
+        let Some(cell) = amx.read_cell(addr) else {
+            break; // endereço inacessível: devolve o que leu até aqui
+        };
+        out.extend_from_slice(&cell.to_le_bytes());
+        addr = addr.wrapping_add(4);
+    }
+    // Fatia [skip, skip+count) do que foi lido (pode ser menor no fim do segmento).
+    let end = (skip + count).min(out.len());
+    Some(out.get(skip..end).unwrap_or(&[]).to_vec())
+}
+
 /// Arma os data breakpoints pedidos pelo adaptador. Resolve cada `(frame, name)`
 /// contra a pausa atual (o frame dá `cip`/`frm`; o símbolo em escopo dá o endereço
 /// de dados e a classe global/local) e passa os watches resolvidos ao controlador.

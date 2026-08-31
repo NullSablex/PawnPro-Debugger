@@ -15,7 +15,7 @@ use std::io::{self, BufReader};
 use std::process::Child;
 use std::sync::Arc;
 
-use messages::Request;
+use messages::{Request, Response};
 use plugin_client::{DapOut, PluginClient};
 use session::{Outgoing, Session, SpawnSpec};
 
@@ -61,6 +61,26 @@ fn main() -> io::Result<()> {
                     if let Some(c) = &plugin {
                         c.send(&cmd);
                     }
+                }
+                Outgoing::ReadMemory {
+                    seq,
+                    address,
+                    frame,
+                    name,
+                    index,
+                    offset,
+                    count,
+                } => {
+                    // Leitura bloqueante no plugin (com timeout), então a resposta.
+                    let bytes = plugin
+                        .as_ref()
+                        .and_then(|c| c.read_memory(frame, name, index, offset, count))
+                        .unwrap_or_default();
+                    let body = serde_json::json!({
+                        "address": address,
+                        "data": base64_encode(&bytes),
+                    });
+                    emit(&out, &Outgoing::Response(Response::ok(seq, &req, body)));
                 }
             }
         }
@@ -173,6 +193,32 @@ fn libc_prctl_pdeathsig() {
     }
 }
 
+/// Codifica bytes em base64 (alfabeto padrão) — o campo `data` do `readMemory`
+/// do DAP é base64. Evita uma dependência externa para algo tão pequeno.
+fn base64_encode(data: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b1 = u32::from(chunk[0]);
+        let b2 = u32::from(chunk.get(1).copied().unwrap_or(0));
+        let b3 = u32::from(chunk.get(2).copied().unwrap_or(0));
+        let n = (b1 << 16) | (b2 << 8) | b3;
+        out.push(A[(n >> 18 & 63) as usize] as char);
+        out.push(A[(n >> 12 & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            A[(n >> 6 & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            A[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 /// Escreve uma resposta/evento DAP gerado pelo `session` no stdout, usando o
 /// `DapOut` para serializar o `seq` de forma consistente com a thread do plugin.
 fn emit(out: &DapOut, outgoing: &Outgoing) {
@@ -190,6 +236,15 @@ fn emit(out: &DapOut, outgoing: &Outgoing) {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn base64_encode_matches_rfc() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"M"), "TQ==");
+        assert_eq!(base64_encode(b"Ma"), "TWE=");
+        assert_eq!(base64_encode(b"Man"), "TWFu");
+        assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
+    }
 
     /// Sink `Write` que acumula tudo num buffer compartilhado, para inspecionar
     /// o que o `DapOut` produziu.

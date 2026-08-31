@@ -184,5 +184,13 @@ fn apply(cmd: Command) {
         }
         Command::SetDataBreakpoints { watches } => crate::hook::set_data_breakpoints(watches),
         Command::SetExceptionFilter { runtime } => crate::hook::set_runtime_errors(runtime),
+        Command::ReadMemory {
+            id,
+            frame,
+            name,
+            index,
+            offset,
+            count,
+        } => crate::hook::read_memory(id, frame, &name, index, offset, count),
     }
 }

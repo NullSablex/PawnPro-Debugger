@@ -25,6 +25,18 @@ pub enum Outgoing {
     ConnectPlugin(String),
     /// Encaminhar um comando ao plugin (breakpoints/continue/step).
     ToPlugin(Command),
+    /// Ler memória crua do plugin (bloqueia esperando a resposta) e responder o
+    /// `readMemory` do editor. Resolvido no `main` (o `session` é puro). `seq` é a
+    /// resposta já numerada; `address` é o texto que volta no campo `address`.
+    ReadMemory {
+        seq: i64,
+        address: String,
+        frame: usize,
+        name: String,
+        index: Option<usize>,
+        offset: i64,
+        count: usize,
+    },
 }
 
 /// Comando do servidor a executar, mais as variáveis de depuração que o plugin lê.
@@ -121,6 +133,7 @@ impl Session {
             "setDataBreakpoints" => self.on_set_data_breakpoints(req),
             "setExceptionBreakpoints" => self.on_set_exception_breakpoints(req),
             "completions" => self.on_completions(req),
+            "readMemory" => self.on_read_memory(req),
             "evaluate" => self.on_evaluate(req),
             "disconnect" | "terminate" => self.on_disconnect(req),
             "restart" => self.on_restart(req),
@@ -169,6 +182,8 @@ impl Session {
             "supportsFunctionBreakpoints": true,
             // Autocomplete no watch/console: sugere variáveis em escopo.
             "supportsCompletionsRequest": true,
+            // Ler memória de dados crua (hex view) a partir de uma variável.
+            "supportsReadMemoryRequest": true,
             // Filtro de exceção: o editor liga/desliga a pausa em erros de runtime.
             "exceptionBreakpointFilters": [
                 { "filter": "runtime", "label": runtime_label, "default": true }
@@ -493,20 +508,28 @@ impl Session {
             .unwrap_or(0);
 
         let vars: Vec<Value> = if let Some((frame, var_index)) = decode_array_ref(reference) {
-            // Elementos de um array (folhas, sem filhos).
+            // Elementos de um array (folhas). `memoryReference` = frame:arr:index.
             crate::plugin_client::frame_vars(frame)
                 .get(var_index)
                 .map(|arr| {
                     arr.children
                         .iter()
                         .map(|c| {
-                            json!({ "name": c.name, "value": c.value, "variablesReference": 0 })
+                            let mem = parse_elem_index(&c.name)
+                                .map(|i| format!("{frame}:{}:{i}", arr.name));
+                            json!({
+                                "name": c.name,
+                                "value": c.value,
+                                "variablesReference": 0,
+                                "memoryReference": mem,
+                            })
                         })
                         .collect()
                 })
                 .unwrap_or_default()
         } else {
-            // Escopo do frame: variáveis de topo; arrays viram expansíveis.
+            // Escopo do frame: variáveis de topo; arrays viram expansíveis. Cada
+            // uma expõe `memoryReference` (frame:name) para o `readMemory`.
             let frame = frame_index(req.arguments.get("variablesReference"));
             crate::plugin_client::frame_vars(frame)
                 .iter()
@@ -517,7 +540,12 @@ impl Session {
                     } else {
                         encode_array_ref(frame, i)
                     };
-                    json!({ "name": v.name, "value": v.value, "variablesReference": child_ref })
+                    json!({
+                        "name": v.name,
+                        "value": v.value,
+                        "variablesReference": child_ref,
+                        "memoryReference": format!("{frame}:{}", v.name),
+                    })
                 })
                 .collect()
         };
@@ -748,6 +776,48 @@ impl Session {
             .and_then(Value::as_array)
             .is_some_and(|fs| fs.iter().any(|f| f.as_str() == Some("runtime")));
         self.reply_with(req, Command::SetExceptionFilter { runtime }, Value::Null)
+    }
+
+    /// `readMemory`: lê memória de dados crua a partir do `memoryReference` de uma
+    /// variável (`frame:name` ou `frame:name:index`, montado em `variables`). A
+    /// leitura em si (bloqueante, no plugin) é feita pelo `main` via
+    /// [`Outgoing::ReadMemory`].
+    fn on_read_memory(&mut self, req: &Request) -> Vec<Outgoing> {
+        let mem_ref = req
+            .arguments
+            .get("memoryReference")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let offset = req
+            .arguments
+            .get("offset")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let count = req
+            .arguments
+            .get("count")
+            .and_then(Value::as_i64)
+            .and_then(|c| usize::try_from(c).ok())
+            .unwrap_or(0);
+
+        let seq = self.next_seq();
+        let Some(DataWatch { frame, name, index }) = parse_data_id(&mem_ref) else {
+            return vec![Outgoing::Response(Response::fail(
+                seq,
+                req,
+                format!("memoryReference inválido: '{mem_ref}'"),
+            ))];
+        };
+        vec![Outgoing::ReadMemory {
+            seq,
+            address: mem_ref,
+            frame,
+            name,
+            index,
+            offset,
+            count,
+        }]
     }
 
     /// `completions`: autocomplete no watch/console. Sugere as variáveis em escopo
@@ -1198,6 +1268,24 @@ mod tests {
         // Refs de escopo de frame (1..N) não são de array.
         assert_eq!(decode_array_ref(1), None);
         assert_eq!(decode_array_ref(9), None);
+    }
+
+    #[test]
+    fn read_memory_parses_reference() {
+        let mut s = Session::new();
+        let out = s.handle(&req(
+            "readMemory",
+            &json!({ "memoryReference": "0:health", "offset": 2, "count": 8 }),
+        ));
+        assert!(out.iter().any(|o| matches!(o,
+            Outgoing::ReadMemory { frame: 0, name, index: None, offset: 2, count: 8, .. }
+            if name == "health")));
+        // Referência inválida → resposta de falha.
+        let out = s.handle(&req(
+            "readMemory",
+            &json!({ "memoryReference": "lixo", "offset": 0, "count": 4 }),
+        ));
+        assert!(!first_response(&out).success);
     }
 
     #[test]

@@ -78,6 +78,18 @@ pub enum Command {
     /// Liga/desliga a pausa em erros de runtime (filtro de exceção do editor).
     /// `false` deixa a VM abortar normalmente, sem pausar antes.
     SetExceptionFilter { runtime: bool },
+    /// Lê memória de dados crua: `count` bytes a partir do endereço da variável
+    /// `name` (elemento `index`, se array) no frame `frame`, mais `offset`. O
+    /// plugin responde com um [`Event::MemoryData`] correlacionado por `id`.
+    ReadMemory {
+        id: u64,
+        frame: usize,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        index: Option<usize>,
+        offset: i64,
+        count: usize,
+    },
 }
 
 /// Um data breakpoint pedido: a variável `name` em escopo no frame `frame`
@@ -112,6 +124,9 @@ pub enum Event {
     Output { text: String },
     /// O script terminou / a VM foi descarregada.
     Exited,
+    /// Resposta a um [`Command::ReadMemory`]: os `bytes` lidos, correlacionados
+    /// pelo `id` do pedido. Vazio se o endereço não pôde ser resolvido/lido.
+    MemoryData { id: u64, bytes: Vec<u8> },
 }
 
 /// Um par variável→valor para a inspeção. Arrays trazem os elementos em

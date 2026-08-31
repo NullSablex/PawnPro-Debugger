@@ -2,14 +2,25 @@
 //! socket da sessão, envia [`Command`]s e recebe [`Event`]s do plugin numa
 //! thread, traduzindo-os em eventos DAP escritos no stdout.
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use interprocess::local_socket::traits::Stream as _;
 use pawnpro_dbg_protocol::transport::{self, LocalStream};
 use pawnpro_dbg_protocol::{self as wire, Command, Event};
 use serde_json::json;
+
+/// Pedidos de leitura de memória pendentes (`id` → canal de resposta). A thread
+/// leitora entrega os bytes do `MemoryData` ao chamador que espera no loop.
+static PENDING_READS: LazyLock<Mutex<HashMap<u64, Sender<Vec<u8>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Contador de `id` de leitura de memória.
+static READ_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Metade de envio do socket local — para enviar comandos ao plugin.
 type SendHalf = <LocalStream as interprocess::local_socket::traits::Stream>::SendHalf;
@@ -175,6 +186,14 @@ impl PluginClient {
                             json!({ "category": "console", "output": format!("{text}\n") }),
                         );
                     }
+                    Ok(Event::MemoryData { id, bytes }) => {
+                        // Entrega ao pedido de leitura que espera no loop principal.
+                        if let Ok(mut p) = PENDING_READS.lock()
+                            && let Some(tx) = p.remove(&id)
+                        {
+                            let _ = tx.send(bytes);
+                        }
+                    }
                     Ok(Event::Exited) => {
                         out.event("terminated", serde_json::Value::Null);
                         break;
@@ -185,6 +204,39 @@ impl PluginClient {
         });
 
         client
+    }
+
+    /// Lê `count` bytes de memória de dados a partir da variável `name` (elemento
+    /// `index`, se array) no `frame`, mais `offset`. Envia `ReadMemory` e bloqueia
+    /// (com timeout) esperando o `MemoryData` correlacionado. `None` no timeout.
+    #[must_use]
+    pub fn read_memory(
+        &self,
+        frame: usize,
+        name: String,
+        index: Option<usize>,
+        offset: i64,
+        count: usize,
+    ) -> Option<Vec<u8>> {
+        let id = READ_ID.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = mpsc::channel();
+        PENDING_READS.lock().ok()?.insert(id, tx);
+        self.send(&Command::ReadMemory {
+            id,
+            frame,
+            name,
+            index,
+            offset,
+            count,
+        });
+        let result = rx.recv_timeout(Duration::from_secs(2)).ok();
+        // Limpa o pendente se deu timeout (no sucesso a thread já removeu).
+        if result.is_none()
+            && let Ok(mut p) = PENDING_READS.lock()
+        {
+            p.remove(&id);
+        }
+        result
     }
 
     /// Envia um comando ao plugin. Se ainda não conectou, enfileira (será enviado
