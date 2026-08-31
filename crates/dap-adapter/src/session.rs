@@ -610,7 +610,11 @@ impl Session {
     /// `dataId: null` recusa (variável fora do cache do frame). Não persiste entre
     /// sessões (locais dependem do frame) e observamos escrita (mudança de valor).
     fn on_data_breakpoint_info(&mut self, req: &Request) -> Vec<Outgoing> {
-        let frame = frame_index(req.arguments.get("variablesReference"));
+        let reference = req
+            .arguments
+            .get("variablesReference")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
         let name = req
             .arguments
             .get("name")
@@ -618,23 +622,35 @@ impl Session {
             .unwrap_or("")
             .to_string();
 
-        // Só oferece se a variável está no cache do frame e não é array (arrays
-        // ainda não observáveis) — evita armar um watch que o plugin recusaria.
-        let var = crate::plugin_client::frame_vars(frame)
-            .into_iter()
-            .find(|v| v.name == name);
-        // Arrays (têm filhos) não são observáveis por data breakpoint ainda.
-        let observable = var.as_ref().is_some_and(|v| v.children.is_empty());
+        // Resolve `(dataId, descrição)`: escalar (`variablesReference` = escopo do
+        // frame) ou ELEMENTO de array (`variablesReference` = ref do array, `name`
+        // = `[i]`). `dataId` codifica `frame:name[:index]`; `null` = não observável.
+        let resolved = if let Some((frame, var_index)) = decode_array_ref(reference) {
+            let vars = crate::plugin_client::frame_vars(frame);
+            match (vars.get(var_index), parse_elem_index(&name)) {
+                (Some(arr), Some(i)) => Some((
+                    format!("{frame}:{}:{i}", arr.name),
+                    format!("{}[{i}]", arr.name),
+                )),
+                _ => None,
+            }
+        } else {
+            let frame = frame_index(req.arguments.get("variablesReference"));
+            // Escalar em escopo (arrays têm filhos e não são observáveis inteiros).
+            crate::plugin_client::frame_vars(frame)
+                .iter()
+                .any(|v| v.name == name && v.children.is_empty())
+                .then(|| (format!("{frame}:{name}"), name.clone()))
+        };
 
-        let body = if observable {
+        let body = if let Some((data_id, description)) = resolved {
             json!({
-                "dataId": format!("{frame}:{name}"),
-                "description": name,
+                "dataId": data_id,
+                "description": description,
                 "accessTypes": ["write"],
                 "canPersist": false,
             })
         } else {
-            // dataId null = não observável (o editor desabilita a opção).
             json!({ "dataId": Value::Null, "description": name })
         };
         self.reply(req, body)
@@ -838,15 +854,15 @@ fn word_prefix(text: &str, column: i64) -> String {
     tail.into_iter().collect()
 }
 
-/// Decodifica um `dataId` (`"frame:name"`, montado no `dataBreakpointInfo`) de
-/// volta em um [`DataWatch`]. O `name` pode conter `:`, então só o primeiro
-/// separador conta.
+/// Decodifica um `dataId` (`"frame:name"` ou `"frame:name:index"`, montado no
+/// `dataBreakpointInfo`) de volta em um [`DataWatch`]. Nomes Pawn são
+/// identificadores (sem `:`), então os campos são posicionais.
 fn parse_data_id(data_id: &str) -> Option<DataWatch> {
-    let (frame, name) = data_id.split_once(':')?;
-    Some(DataWatch {
-        frame: frame.parse().ok()?,
-        name: name.to_string(),
-    })
+    let mut parts = data_id.splitn(3, ':');
+    let frame = parts.next()?.parse().ok()?;
+    let name = parts.next()?.to_string();
+    let index = parts.next().and_then(|s| s.parse().ok());
+    Some(DataWatch { frame, name, index })
 }
 
 /// Anexa `source` (se houver) a um frame do `stackTrace`, para o editor ancorar a
@@ -1125,20 +1141,22 @@ mod tests {
     }
 
     #[test]
-    fn parse_data_id_splits_frame_and_name() {
+    fn parse_data_id_splits_frame_name_index() {
         assert_eq!(
             parse_data_id("0:health"),
             Some(DataWatch {
                 frame: 0,
-                name: "health".into()
+                name: "health".into(),
+                index: None,
             })
         );
-        // Nome com ':' — só o primeiro separador conta.
+        // Elemento de array: frame:name:index.
         assert_eq!(
-            parse_data_id("2:a:b"),
+            parse_data_id("2:arr:3"),
             Some(DataWatch {
                 frame: 2,
-                name: "a:b".into()
+                name: "arr".into(),
+                index: Some(3),
             })
         );
         // Sem separador ou frame não-numérico → None.
@@ -1158,8 +1176,8 @@ mod tests {
             &out,
             |c| matches!(c, Command::SetDataBreakpoints { watches }
             if watches.len() == 2
-                && watches[0] == DataWatch { frame: 1, name: "health".into() }
-                && watches[1] == DataWatch { frame: 0, name: "g_placar".into() })
+                && watches[0] == DataWatch { frame: 1, name: "health".into(), index: None }
+                && watches[1] == DataWatch { frame: 0, name: "g_placar".into(), index: None })
         ));
         // E responde os dois como verificados.
         let bps = first_response(&out).body["breakpoints"].as_array().unwrap();

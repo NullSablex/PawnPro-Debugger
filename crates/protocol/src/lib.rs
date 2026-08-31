@@ -82,10 +82,13 @@ pub enum Command {
 
 /// Um data breakpoint pedido: a variável `name` em escopo no frame `frame`
 /// (0 = topo). O plugin resolve o endereço de dados e passa a observar mudanças.
+/// `index` observa um elemento de array (`name[index]`); `None` observa um escalar.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DataWatch {
     pub frame: usize,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<usize>,
 }
 
 /// Evento do plugin para o adaptador.
@@ -192,10 +195,12 @@ mod tests {
                     DataWatch {
                         frame: 0,
                         name: "health".into(),
+                        index: None,
                     },
                     DataWatch {
                         frame: 2,
-                        name: "g_placar".into(),
+                        name: "placar".into(),
+                        index: Some(3),
                     },
                 ],
             },

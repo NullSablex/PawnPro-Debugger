@@ -355,10 +355,25 @@ fn resolve_data_watches(reqs: Vec<pawnpro_dbg_protocol::DataWatch>) -> Vec<DataW
                 .symbols_in_scope(cip)
                 .into_iter()
                 .find(|s| s.name == req.name)?;
-            if sym.is_array() {
-                return None; // observar arrays ainda não é suportado
-            }
-            let addr = sym.effective_address(frm);
+            let base = sym.effective_address(frm);
+            // Elemento de array (`name[index]`) ou escalar. Arrays só são
+            // observáveis por um elemento; escalares, sem índice.
+            let (addr, name) = if let Some(i) = req.index {
+                if !sym.is_array() {
+                    return None;
+                }
+                let len = usize::try_from(sym.dims.first().map_or(0, |d| d.size)).unwrap_or(0);
+                if i >= len {
+                    return None;
+                }
+                let addr = base.wrapping_add(i32::try_from(i).ok()?.wrapping_mul(4));
+                (addr, format!("{}[{i}]", req.name))
+            } else {
+                if sym.is_array() {
+                    return None;
+                }
+                (base, req.name)
+            };
             // Global: endereço absoluto, nunca expira. Local: relativo ao frame,
             // expira quando o frame `frm` retorna.
             let frame_frm = (sym.vclass != VClass::Global).then_some(frm);
@@ -367,7 +382,7 @@ fn resolve_data_watches(reqs: Vec<pawnpro_dbg_protocol::DataWatch>) -> Vec<DataW
                 addr,
                 frame_frm,
                 last,
-                name: req.name,
+                name,
             })
         })
         .collect()
