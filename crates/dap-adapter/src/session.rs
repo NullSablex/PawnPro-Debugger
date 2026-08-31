@@ -51,8 +51,12 @@ pub struct Session {
     seq: i64,
     /// Bloco de debug do `.amx` em depuração (carregado no `launch`).
     dbg: Option<AmxDbg>,
-    /// Breakpoints resolvidos: (linha-fonte, endereço de código).
+    /// Breakpoints de linha resolvidos: (linha-fonte, endereço de código).
     breakpoints: Vec<(i32, u32)>,
+    /// Breakpoints de linha resolvidos (forma completa, com modificadores).
+    line_bps: Vec<Breakpoint>,
+    /// Breakpoints de função resolvidos (parar ao entrar na função por nome).
+    fn_bps: Vec<Breakpoint>,
     /// Caminho do arquivo-fonte (o `source.path` que o editor enviou em
     /// `setBreakpoints`). Usado no `stackTrace` para o frame apontar à fonte —
     /// senão o editor mostra "Origem Desconhecida".
@@ -98,6 +102,7 @@ impl Session {
             "initialize" => self.on_initialize(req),
             "launch" => self.on_launch(req),
             "setBreakpoints" => self.on_set_breakpoints(req),
+            "setFunctionBreakpoints" => self.on_set_function_breakpoints(req),
             "threads" => self.on_threads(req),
             "continue" => self.on_continue(req),
             "next" => self.on_step(req, Step::Over),
@@ -144,6 +149,8 @@ impl Session {
             // Data breakpoints: pausar quando uma variável muda de valor
             // ("Break on Value Change" no painel Variáveis).
             "supportsDataBreakpoints": true,
+            // Breakpoints de função: parar ao entrar numa função por nome.
+            "supportsFunctionBreakpoints": true,
             // Filtro de exceção: o editor liga/desliga a pausa em erros de runtime.
             "exceptionBreakpointFilters": [
                 { "filter": "runtime", "label": "Erros de runtime", "default": true }
@@ -289,7 +296,7 @@ impl Session {
 
         self.breakpoints.clear();
         let mut verified = Vec::new();
-        let mut breakpoints = Vec::new();
+        let mut line_bps = Vec::new();
         for ReqBp {
             line,
             condition,
@@ -303,7 +310,7 @@ impl Session {
                 .and_then(|d| d.line_to_address(line, file));
             if let Some(a) = addr {
                 self.breakpoints.push((line, a));
-                breakpoints.push(Breakpoint {
+                line_bps.push(Breakpoint {
                     addr: a,
                     condition,
                     hit_condition,
@@ -320,6 +327,56 @@ impl Session {
             verified.push(json!({ "verified": addr.is_some(), "line": actual_line }));
         }
 
+        // Substitui os breakpoints de LINHA e envia a união (linha + função) — o
+        // plugin mantém um único conjunto.
+        self.line_bps = line_bps;
+        let breakpoints = self.all_breakpoints();
+        let body = json!({ "breakpoints": verified });
+        self.reply_with(req, Command::SetBreakpoints { breakpoints }, body)
+    }
+
+    /// União dos breakpoints de linha e de função — o plugin mantém um conjunto só.
+    fn all_breakpoints(&self) -> Vec<Breakpoint> {
+        self.line_bps
+            .iter()
+            .chain(self.fn_bps.iter())
+            .cloned()
+            .collect()
+    }
+
+    /// `setFunctionBreakpoints`: substitui os breakpoints de FUNÇÃO. Cada `name` é
+    /// resolvido no endereço de entrada da função (via `AmxDbg::function_address`)
+    /// e entra na união enviada ao plugin. Responde verificado por breakpoint.
+    fn on_set_function_breakpoints(&mut self, req: &Request) -> Vec<Outgoing> {
+        let names: Vec<String> = req
+            .arguments
+            .get("breakpoints")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|b| b.get("name").and_then(Value::as_str).map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut fn_bps = Vec::new();
+        let mut verified = Vec::new();
+        for name in names {
+            let addr = self.dbg.as_ref().and_then(|d| d.function_address(&name));
+            if let Some(a) = addr {
+                fn_bps.push(Breakpoint {
+                    addr: a,
+                    condition: None,
+                    hit_condition: None,
+                    log_message: None,
+                });
+            }
+            let line = addr.and_then(|a| self.dbg.as_ref().and_then(|d| d.lookup_line(a)));
+            verified.push(json!({ "verified": addr.is_some(), "line": line }));
+        }
+
+        self.fn_bps = fn_bps;
+        let breakpoints = self.all_breakpoints();
         let body = json!({ "breakpoints": verified });
         self.reply_with(req, Command::SetBreakpoints { breakpoints }, body)
     }
@@ -1074,6 +1131,42 @@ mod tests {
     }
 
     #[test]
+    fn function_breakpoints_resolve_and_union_with_line() {
+        let mut s = Session::new();
+        s.set_debug(sample_dbg_fn());
+        // 1 breakpoint de linha (linha 4 → addr 20).
+        s.handle(&req(
+            "setBreakpoints",
+            &json!({ "source": { "path": "a.pwn" }, "breakpoints": [ { "line": 4 } ] }),
+        ));
+        // Breakpoint de função "foo" (entrada em addr 8) + "naoexiste" (não resolve).
+        let out = s.handle(&req(
+            "setFunctionBreakpoints",
+            &json!({ "breakpoints": [ { "name": "foo" }, { "name": "naoexiste" } ] }),
+        ));
+        // Verificação: foo ok, naoexiste não.
+        let bps = first_response(&out).body["breakpoints"].as_array().unwrap();
+        assert_eq!(bps[0]["verified"], true);
+        assert_eq!(bps[1]["verified"], false);
+        // A união enviada ao plugin tem o bp de linha (20) e o de função (8).
+        assert!(has_command(
+            &out,
+            |c| matches!(c, Command::SetBreakpoints { breakpoints }
+            if breakpoints.iter().any(|b| b.addr == 20) && breakpoints.iter().any(|b| b.addr == 8))
+        ));
+    }
+
+    #[test]
+    fn initialize_advertises_function_breakpoints() {
+        let mut s = Session::new();
+        let out = s.handle(&req("initialize", &Value::Null));
+        assert_eq!(
+            first_response(&out).body["supportsFunctionBreakpoints"],
+            true
+        );
+    }
+
+    #[test]
     fn initialize_advertises_exception_filter() {
         let mut s = Session::new();
         let out = s.handle(&req("initialize", &Value::Null));
@@ -1098,15 +1191,35 @@ mod tests {
 
     /// Bloco de debug mínimo (mesma forma do teste do amxdbg): a.pwn linha 3 → 20.
     fn sample_dbg() -> AmxDbg {
+        dbg_bytes(0, |_| {})
+    }
+
+    /// Como `sample_dbg`, mas com uma função `foo` no range `[8, 40)` — para testar
+    /// `setFunctionBreakpoints` (o endereço de entrada cai na 1ª linha, addr 8).
+    fn sample_dbg_fn() -> AmxDbg {
+        dbg_bytes(1, |t| {
+            ext_u32(t, 0); // address
+            ext_i16(t, 0); // tag
+            ext_u32(t, 8); // codestart
+            ext_u32(t, 40); // codeend
+            t.push(9); // ident = Function
+            t.push(0); // vclass = global
+            ext_i16(t, 0); // dim
+            ext_cstr(t, "foo"); // name
+        })
+    }
+
+    /// Monta um `AmxDbg` com 1 arquivo, 2 linhas ((8,2),(20,3)) e `nsyms` símbolos
+    /// (escritos por `push_syms`).
+    fn dbg_bytes(nsyms: i16, push_syms: impl Fn(&mut Vec<u8>)) -> AmxDbg {
         let mut t = Vec::new();
-        // files: 1 (a.pwn @ 0)
         ext_u32(&mut t, 0);
         ext_cstr(&mut t, "a.pwn");
-        // lines: 2 — (8,2), (20,3)
         ext_u32(&mut t, 8);
         ext_i32(&mut t, 2);
         ext_u32(&mut t, 20);
         ext_i32(&mut t, 3);
+        push_syms(&mut t);
         let mut b = Vec::new();
         ext_i32(&mut b, i32::try_from(22 + t.len()).unwrap());
         b.extend_from_slice(&samp_sdk::debug::AMX_DBG_MAGIC.to_le_bytes());
@@ -1115,7 +1228,7 @@ mod tests {
         ext_i16(&mut b, 0); // flags
         ext_i16(&mut b, 1); // files
         ext_i16(&mut b, 2); // lines
-        ext_i16(&mut b, 0); // symbols
+        ext_i16(&mut b, nsyms); // symbols
         ext_i16(&mut b, 0); // tags
         ext_i16(&mut b, 0); // automatons
         ext_i16(&mut b, 0); // states
