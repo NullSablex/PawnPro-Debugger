@@ -8,33 +8,38 @@ Podem existir falhas ou itens não declarados, causados por falha humana ou por 
 
 ---
 
-## [Não lançado]
+## [0.2.0] - 31/08/2026
+
+Segundo pré-lançamento. Amplia o conjunto DAP suportado: a depuração deixa de ser
+"breakpoint e inspeção" e passa a cobrir call stack, data breakpoints, edição por
+expressão, leitura de memória e mais três classes de erro de runtime.
 
 ### Adicionado
-- **Call stack multi-frame** — o plugin caminha a cadeia de frames do AMX (FRM → endereço de retorno) e entrega nome da função, linha e variáveis de cada frame; o editor navega entre eles e a inspeção segue o frame selecionado.
-- **Breakpoints de função** — parar ao entrar numa função pelo nome. O adaptador resolve o nome no bloco `AMX_DBG` e envia ao plugin a união dos breakpoints de linha e de função; nome que não resolve volta como não verificado.
-- **Data breakpoints** — pausar quando um valor muda, em globais, locais e **elementos de array** (`arr[3]`). Watches de locais expiram quando o frame dono retorna, para não disparar com o lixo de outro frame no mesmo slot; endereço ilegível não gera disparo.
-- **Inspeção rica de arrays e strings** — arrays são expansíveis (cada elemento vira um filho) e arrays de char são resumidos como **string** quando o conteúdo parece texto terminado em zero.
-- **`setExpression`** — editar um lvalue (`x = 1`, `arr[i] = 10`) direto no watch ou no console, com o índice podendo ser uma subexpressão. O array inteiro não é editável, só os elementos.
-- **`readMemory`** — hex view da memória de dados crua a partir de qualquer variável: cada variável passa a expor um `memoryReference`, e o adaptador devolve os bytes em base64 (encoder próprio, sem dependência nova).
-- **Autocomplete** (`completions`) — sugestão de variáveis em escopo no watch e no console.
+- **Call stack multi-frame** — caminha a cadeia de frames do AMX (FRM → endereço de retorno) e entrega nome da função, linha e variáveis de cada frame. O editor navega entre os frames e a inspeção segue o frame selecionado.
+- **Data breakpoints** — pausar quando um valor muda, em globais, locais e **elementos de array** (`arr[3]`). Watches de locais expiram quando o frame dono retorna, para não dispararem com o conteúdo de outro frame no mesmo slot.
+- **Breakpoints de função** — parar ao entrar numa função pelo nome; um nome que não resolve volta ao editor como não verificado, sem quebrar a sessão.
+- **Três novos erros de runtime** — `STACKERR` (colisão pilha/heap), `HEAPLOW` (underflow de heap) e `MEMACCESS` (acesso inválido à memória), somando-se à divisão por zero e ao índice fora do limite. A simulação é fiel ao `amx.c` e conservadora: o rastreio dos registradores perde a confiança ao primeiro opcode não modelado, então não há falso-positivo.
 - **Filtro de exceção** — o editor liga e desliga a pausa em erros de runtime pelo painel de breakpoints.
-- **Mais erros de runtime** — `STACKERR` (colisão pilha/heap), `HEAPLOW` (underflow de heap) e `MEMACCESS` (acesso inválido à memória), com simulação fiel ao `amx.c` e conservadora: o rastreio de `pri`/`alt`/`stk`/`hea` perde a confiança ao primeiro opcode não modelado, então nunca há falso-positivo.
-- **Avaliador de expressões** para watch/hover — um operador de topo com `+ - * / %` (semântica de truncamento do Pawn) e `== != < > <= >=`, sobre literais, variáveis e `arr[i]`.
+- **Inspeção de arrays e strings** — arrays são expansíveis (cada elemento vira um filho) e arrays de char são mostrados como **string** quando o conteúdo é texto terminado em zero.
+- **Edição por expressão** (`setExpression`) — `x = 1` ou `arr[i] = 10` direto no watch ou no console, com o índice podendo ser uma subexpressão. O array inteiro não é editável, só os elementos.
+- **Leitura de memória** (`readMemory`) — hex view da memória de dados crua a partir de qualquer variável, que agora expõe um `memoryReference`.
+- **Expressões no watch e no hover** — um operador de topo com `+ - * / %` (seguindo o truncamento do Pawn) e `== != < > <= >=`, sobre literais, variáveis e `arr[i]`.
+- **Autocomplete** — sugestão de variáveis em escopo no watch e no console.
+- **Documentação em inglês** — o site passa a ter **pt-BR** na raiz e **en-US** em `/en-US/`, com todas as páginas traduzidas e o menu localizado.
 
 ### Alterado
-- **Mensagens localizadas centralizadas** em `crates/protocol/src/messages` — `Locale`, as 11 `MsgKey` e uma tabela por idioma (pt-BR, en, es, ro, ru), compartilhadas pelo plugin e pelo adaptador. O `match` por chave é exaustivo: idioma incompleto não compila.
-- **Primeiro canal request/response do protocolo** — `Command::ReadMemory` ↔ `Event::MemoryData`, correlacionados por `id` e com timeout, sem prender a sessão se o plugin não responder.
-- **Documentação reescrita** — `README.md` (com badges de CI, CodeQL, docs, OpenSSF Scorecard, release, downloads, stars e licença), `docs/features.md`, `docs/architecture.md`, `docs/index.md`, `docs/getting-started.md` e a nova página de [localização](docs/i18n.md), com a meta de 50 idiomas.
-- **Site da documentação bilíngue** — `mkdocs-static-i18n` com **pt-BR** na raiz e **en-US** em `/en-US/`, as seis páginas traduzidas e o nav por `nav_translations`. O tema do locale `en-US` aponta para `en`, porque o Material só traz tabela de interface para `en`.
-- **Comentários do código padronizados em português** — `hook.rs` estava inteiramente em inglês (mais pontos isolados em `plugin_client.rs`, `inspect.rs` e `langs/en.rs`); na passagem, cortado o que apenas repetia a assinatura.
+- **Mensagens do adaptador agora são localizadas** — antes só os erros de runtime seguiam o idioma do editor. As mensagens dos dois lados foram unificadas em `crates/protocol/src/messages`, com 11 chaves em pt-BR, en, es, ro e ru; a tabela de cada idioma é exaustiva, então um idioma incompleto não compila.
+- **O protocolo ganhou um canal request/response** — `ReadMemory` ↔ `MemoryData`, correlacionados por `id` e com timeout, para a sessão não ficar presa se o plugin não responder. O restante do protocolo continua assíncrono nos dois sentidos.
+- **README e documentação reescritos** — recursos, arquitetura e a página de localização atualizados para o que esta versão entrega.
 
-### Corrigido
-- Tabela de erros em `docs/runtime-errors.md`: faltavam `OP_CALL_PRI` no STACKERR e `OP_LODB_I`/`OP_STRB_I`/`OP_LIDX_B` no MEMACCESS, todos já checados no plugin.
-- Doc de `resolve_data_watches`, que ainda dizia que arrays não eram observáveis — elementos de array passaram a ser.
+### Dependências
+- **SDK `rust-samp`** atualizado ao longo do ciclo, acompanhando o que cada versão liberou: `v3.3.1` (correção), `v3.4.0`, o acessor `Amx::hlw` (exigido pelo HEAPLOW) e `AmxDbg::function_address` (exigido pelos breakpoints de função).
+- Atualizações de `serde` (1.0.229), `serde_json` (1.0.151), das GitHub Actions e das dependências da documentação.
 
 ### Infraestrutura
-- **OpenSSF Scorecard** (`.github/workflows/scorecard.yml`) — análise em push no `master`, semanal e manual, com actions pinadas por SHA e permissões mínimas. Publica na API pública do OpenSSF (o que sustenta o badge) e envia o SARIF ao code scanning.
+- **CodeQL** migrado para advanced setup, garantindo as duas análises (`actions`, `rust`) em todo pull request, com `CODEOWNERS`.
+- **OpenSSF Scorecard** — análise semanal e em push no `master`, publicando o resultado na API pública do OpenSSF e o SARIF no code scanning.
+- **Dependabot** para `github-actions`, `cargo` e `pip`, agrupado em um PR por ecossistema.
 
 ## [0.1.0] - 04/07/2026
 

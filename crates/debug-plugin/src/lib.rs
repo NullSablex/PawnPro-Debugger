@@ -40,7 +40,7 @@ static FIRST_AMX_SEEN: AtomicBool = AtomicBool::new(false);
 /// (`src/core/server.ts`). NÃO renomear o valor — é contrato com a extensão.
 #[used]
 #[unsafe(no_mangle)]
-pub static PAWNPRO_DEBUG_MARKER: [u8; 26] = *b"PAWNPRO_DEBUG_MARKER:0.1.0";
+pub static PAWNPRO_DEBUG_MARKER: [u8; 26] = *b"PAWNPRO_DEBUG_MARKER:0.2.0";
 
 /// Mantém o marcador vivo até o link final. `#[used]` sozinho não basta para um
 /// cdylib: o linker ainda pode descartar o dado por não ser referenciado nem
