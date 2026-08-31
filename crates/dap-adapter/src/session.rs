@@ -118,6 +118,7 @@ impl Session {
             "dataBreakpointInfo" => self.on_data_breakpoint_info(req),
             "setDataBreakpoints" => self.on_set_data_breakpoints(req),
             "setExceptionBreakpoints" => self.on_set_exception_breakpoints(req),
+            "completions" => self.on_completions(req),
             "evaluate" => self.on_evaluate(req),
             "disconnect" | "terminate" => self.on_disconnect(req),
             "restart" => self.on_restart(req),
@@ -162,6 +163,8 @@ impl Session {
             "supportsDataBreakpoints": true,
             // Breakpoints de função: parar ao entrar numa função por nome.
             "supportsFunctionBreakpoints": true,
+            // Autocomplete no watch/console: sugere variáveis em escopo.
+            "supportsCompletionsRequest": true,
             // Filtro de exceção: o editor liga/desliga a pausa em erros de runtime.
             "exceptionBreakpointFilters": [
                 { "filter": "runtime", "label": runtime_label, "default": true }
@@ -671,6 +674,36 @@ impl Session {
         self.reply_with(req, Command::SetExceptionFilter { runtime }, Value::Null)
     }
 
+    /// `completions`: autocomplete no watch/console. Sugere as variáveis em escopo
+    /// no frame cujos nomes começam com o "pedaço" já digitado (o identificador
+    /// antes do cursor). Sem prefixo, sugere todas.
+    fn on_completions(&mut self, req: &Request) -> Vec<Outgoing> {
+        let frame = req
+            .arguments
+            .get("frameId")
+            .and_then(Value::as_i64)
+            .and_then(|id| usize::try_from(id - 1).ok())
+            .unwrap_or(0);
+        let text = req
+            .arguments
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let column = req
+            .arguments
+            .get("column")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let prefix = word_prefix(text, column);
+
+        let targets: Vec<Value> = crate::plugin_client::frame_vars(frame)
+            .into_iter()
+            .filter(|v| prefix.is_empty() || v.name.starts_with(&prefix))
+            .map(|v| json!({ "label": v.name, "type": "variable" }))
+            .collect();
+        self.reply(req, json!({ "targets": targets }))
+    }
+
     /// `evaluate`: painel INSPEÇÃO (watch) e hover. Avalia a expressão com o
     /// [`crate::expr`] contra as variáveis do frame: nome, literal, `arr[i]`, ou
     /// `A OP B` (aritmética/comparação). O que não avaliar vira falha explícita
@@ -788,6 +821,20 @@ fn decode_array_ref(reference: i64) -> Option<(usize, usize)> {
 /// inspeção). `None` se não casar o formato.
 fn parse_elem_index(name: &str) -> Option<usize> {
     name.strip_prefix('[')?.strip_suffix(']')?.parse().ok()
+}
+
+/// Identificador sendo digitado antes do cursor (`column`, 1-based em `text`) —
+/// a corrida final de `[A-Za-z0-9_]`. Usado para filtrar o autocomplete.
+fn word_prefix(text: &str, column: i64) -> String {
+    let n = usize::try_from(column).unwrap_or(0).saturating_sub(1);
+    let typed: String = text.chars().take(n).collect();
+    let mut tail: Vec<char> = typed
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    tail.reverse();
+    tail.into_iter().collect()
 }
 
 /// Decodifica um `dataId` (`"frame:name"`, montado no `dataBreakpointInfo`) de
@@ -1057,6 +1104,15 @@ mod tests {
         // Refs de escopo de frame (1..N) não são de array.
         assert_eq!(decode_array_ref(1), None);
         assert_eq!(decode_array_ref(9), None);
+    }
+
+    #[test]
+    fn word_prefix_extracts_trailing_identifier() {
+        assert_eq!(word_prefix("hea", 4), "hea"); // cursor no fim
+        assert_eq!(word_prefix("x + he", 7), "he"); // após operador
+        assert_eq!(word_prefix("arr[i", 6), "i"); // dentro de colchete
+        assert_eq!(word_prefix("x + ", 5), ""); // depois de espaço → vazio
+        assert_eq!(word_prefix("health", 4), "hea"); // cursor no meio
     }
 
     #[test]
