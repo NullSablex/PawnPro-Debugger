@@ -116,6 +116,7 @@ impl Session {
             "scopes" => self.on_scopes(req),
             "variables" => self.on_variables(req),
             "setVariable" => self.on_set_variable(req),
+            "setExpression" => self.on_set_expression(req),
             "dataBreakpointInfo" => self.on_data_breakpoint_info(req),
             "setDataBreakpoints" => self.on_set_data_breakpoints(req),
             "setExceptionBreakpoints" => self.on_set_exception_breakpoints(req),
@@ -159,6 +160,8 @@ impl Session {
             "supportsLogPoints": true,
             // Editar variável no painel Variáveis durante a pausa.
             "supportsSetVariable": true,
+            // Editar via expressão (ex.: `arr[i]`) no watch/console.
+            "supportsSetExpression": true,
             // Data breakpoints: pausar quando uma variável muda de valor
             // ("Break on Value Change" no painel Variáveis).
             "supportsDataBreakpoints": true,
@@ -604,6 +607,62 @@ impl Session {
         ]
     }
 
+    /// `setExpression`: edita um lvalue (`name` ou `arr[i]`) no watch/console. O
+    /// índice pode ser subexpressão. Encaminha ao plugin como `SetVariable`.
+    fn on_set_expression(&mut self, req: &Request) -> Vec<Outgoing> {
+        let expr = req
+            .arguments
+            .get("expression")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let raw = req
+            .arguments
+            .get("value")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let frame = req
+            .arguments
+            .get("frameId")
+            .and_then(Value::as_i64)
+            .and_then(|id| usize::try_from(id - 1).ok())
+            .unwrap_or(0);
+
+        let seq = self.next_seq();
+        let Some((value, shown)) = parse_set_value(&raw) else {
+            let detail = messages::format(self.locale, MsgKey::InvalidValue, &[&raw]);
+            return vec![Outgoing::Response(Response::fail(seq, req, detail))];
+        };
+        let vars = crate::plugin_client::frame_vars(frame);
+        let Some((name, index)) = parse_lvalue(&expr, &vars) else {
+            let detail = messages::format(self.locale, MsgKey::CannotEvaluate, &[&expr]);
+            return vec![Outgoing::Response(Response::fail(seq, req, detail))];
+        };
+
+        // Cache otimista (o painel reflete sem reler a VM).
+        if let Some(i) = index {
+            if let Some(vi) = vars.iter().position(|v| v.name == name) {
+                crate::plugin_client::update_array_elem(frame, vi, i, &shown);
+            }
+        } else {
+            crate::plugin_client::update_var(frame, &name, &shown);
+        }
+
+        let body = json!({ "value": shown, "variablesReference": 0 });
+        vec![
+            Outgoing::ToPlugin(Command::SetVariable {
+                frame,
+                name,
+                index,
+                value,
+            }),
+            Outgoing::Response(Response::ok(seq, req, body)),
+        ]
+    }
+
     /// `dataBreakpointInfo`: o editor pergunta se dá para observar mudanças na
     /// variável `name` do escopo (`variablesReference` = frame). Respondemos um
     /// `dataId` opaco (`"frame:name"`) que o `setDataBreakpoints` seguinte reusa;
@@ -838,6 +897,24 @@ fn decode_array_ref(reference: i64) -> Option<(usize, usize)> {
 /// inspeção). `None` se não casar o formato.
 fn parse_elem_index(name: &str) -> Option<usize> {
     name.strip_prefix('[')?.strip_suffix(']')?.parse().ok()
+}
+
+/// Interpreta um lvalue (`name` ou `name[expr]`) para `setExpression`. O índice
+/// pode ser literal ou subexpressão (resolvida por [`crate::expr`] contra as
+/// variáveis do frame). `None` se não for um lvalue simples.
+fn parse_lvalue(expr: &str, vars: &[pawnpro_dbg_protocol::Var]) -> Option<(String, Option<usize>)> {
+    let expr = expr.trim();
+    if let Some(open) = expr.find('[')
+        && let Some(stripped) = expr.strip_suffix(']')
+    {
+        let name = expr[..open].trim().to_string();
+        let idx = crate::expr::eval(&stripped[open + 1..], vars)?
+            .parse::<usize>()
+            .ok()?;
+        return (!name.is_empty()).then_some((name, Some(idx)));
+    }
+    (!expr.is_empty() && expr.chars().all(|c| c.is_alphanumeric() || c == '_'))
+        .then(|| (expr.to_string(), None))
 }
 
 /// Identificador sendo digitado antes do cursor (`column`, 1-based em `text`) —
@@ -1121,6 +1198,35 @@ mod tests {
         // Refs de escopo de frame (1..N) não são de array.
         assert_eq!(decode_array_ref(1), None);
         assert_eq!(decode_array_ref(9), None);
+    }
+
+    #[test]
+    fn parse_lvalue_scalar_and_element() {
+        let no_vars: Vec<pawnpro_dbg_protocol::Var> = vec![];
+        assert_eq!(parse_lvalue("x", &no_vars), Some(("x".into(), None)));
+        assert_eq!(
+            parse_lvalue("arr[2]", &no_vars),
+            Some(("arr".into(), Some(2)))
+        );
+        // Não é lvalue simples.
+        assert_eq!(parse_lvalue("x + 1", &no_vars), None);
+        assert_eq!(parse_lvalue("arr[", &no_vars), None);
+        assert_eq!(parse_lvalue("", &no_vars), None);
+    }
+
+    #[test]
+    fn set_expression_forwards_element_edit() {
+        let mut s = Session::new();
+        let out = s.handle(&req(
+            "setExpression",
+            &json!({ "expression": "arr[2]", "value": "9", "frameId": 1 }),
+        ));
+        assert!(has_command(
+            &out,
+            |c| matches!(c, Command::SetVariable { name, index, value, .. }
+            if name == "arr" && *index == Some(2) && *value == 9)
+        ));
+        assert_eq!(first_response(&out).body["value"], "9");
     }
 
     #[test]
