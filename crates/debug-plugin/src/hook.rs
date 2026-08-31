@@ -183,8 +183,8 @@ fn on_pause(amx: &Amx, cip: u32, frm: i32, reason: &str, description: Option<&st
         Err(_) => (Vec::new(), Vec::new()),
     };
 
-    // Publish the pause context (every frame's cip/frm) so the socket thread can
-    // edit variables in the selected frame while the VM is blocked just below.
+    // Publica o contexto da pausa (cip/frm de cada frame) para a thread do socket
+    // editar variáveis no frame selecionado enquanto a VM está bloqueada abaixo.
     if let (Ok(mut guard), Some(ptr)) = (PAUSE_CTX.lock(), amx.amx()) {
         *guard = Some((ptr.as_ptr() as usize, ctx));
     }

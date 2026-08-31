@@ -157,32 +157,20 @@ impl Session {
             .and_then(Value::as_str)
             .map_or_else(Locale::default, Locale::from_tag);
         let runtime_label = messages::msg(self.locale, MsgKey::RuntimeErrorsLabel);
-        // Capabilities mínimas da v1.
+        // Capabilities mínimas da v1. `supportsEvaluateForHovers` reaproveita o
+        // `evaluate` do painel INSPEÇÃO ao passar o mouse no código.
         let caps = json!({
             "supportsConfigurationDoneRequest": true,
             "supportsTerminateRequest": true,
-            // Habilita avaliar variável ao passar o mouse no código (hover) — usa
-            // o mesmo `evaluate` do painel INSPEÇÃO (watch).
             "supportsEvaluateForHovers": true,
-            // Breakpoint condicional: o plugin avalia `var OP valor` e só pausa
-            // se verdadeiro.
             "supportsConditionalBreakpoints": true,
-            // Breakpoint por contagem de acertos (`5`, `>=3`, `%2`).
             "supportsHitConditionalBreakpoints": true,
-            // Logpoint: breakpoint que loga `msg com {var}` sem pausar.
             "supportsLogPoints": true,
-            // Editar variável no painel Variáveis durante a pausa.
             "supportsSetVariable": true,
-            // Editar via expressão (ex.: `arr[i]`) no watch/console.
             "supportsSetExpression": true,
-            // Data breakpoints: pausar quando uma variável muda de valor
-            // ("Break on Value Change" no painel Variáveis).
             "supportsDataBreakpoints": true,
-            // Breakpoints de função: parar ao entrar numa função por nome.
             "supportsFunctionBreakpoints": true,
-            // Autocomplete no watch/console: sugere variáveis em escopo.
             "supportsCompletionsRequest": true,
-            // Ler memória de dados crua (hex view) a partir de uma variável.
             "supportsReadMemoryRequest": true,
             // Filtro de exceção: o editor liga/desliga a pausa em erros de runtime.
             "exceptionBreakpointFilters": [
