@@ -109,6 +109,7 @@ impl Session {
             "setVariable" => self.on_set_variable(req),
             "dataBreakpointInfo" => self.on_data_breakpoint_info(req),
             "setDataBreakpoints" => self.on_set_data_breakpoints(req),
+            "setExceptionBreakpoints" => self.on_set_exception_breakpoints(req),
             "evaluate" => self.on_evaluate(req),
             "disconnect" | "terminate" => self.on_disconnect(req),
             "restart" => self.on_restart(req),
@@ -143,6 +144,10 @@ impl Session {
             // Data breakpoints: pausar quando uma variável muda de valor
             // ("Break on Value Change" no painel Variáveis).
             "supportsDataBreakpoints": true,
+            // Filtro de exceção: o editor liga/desliga a pausa em erros de runtime.
+            "exceptionBreakpointFilters": [
+                { "filter": "runtime", "label": "Erros de runtime", "default": true }
+            ],
             // NÃO declaramos `supportsRestartRequest`: assim o editor faz o
             // restart como disconnect + novo launch, que passa pelo nosso fluxo
             // (derruba o servidor antigo, espera a porta, sobe um novo) — o único
@@ -597,6 +602,18 @@ impl Session {
         self.reply_with(req, Command::SetDataBreakpoints { watches }, body)
     }
 
+    /// `setExceptionBreakpoints`: o editor envia os filtros ativos. Ligamos a
+    /// pausa em erros de runtime se o filtro `runtime` estiver na lista; senão a
+    /// desligamos (a VM aborta normalmente).
+    fn on_set_exception_breakpoints(&mut self, req: &Request) -> Vec<Outgoing> {
+        let runtime = req
+            .arguments
+            .get("filters")
+            .and_then(Value::as_array)
+            .is_some_and(|fs| fs.iter().any(|f| f.as_str() == Some("runtime")));
+        self.reply_with(req, Command::SetExceptionFilter { runtime }, Value::Null)
+    }
+
     /// `evaluate`: painel INSPEÇÃO (watch) e hover. Avalia a expressão com o
     /// [`crate::expr`] contra as variáveis do frame: nome, literal, `arr[i]`, ou
     /// `A OP B` (aritmética/comparação). O que não avaliar vira falha explícita
@@ -1034,6 +1051,34 @@ mod tests {
         let bps = first_response(&out).body["breakpoints"].as_array().unwrap();
         assert_eq!(bps.len(), 2);
         assert_eq!(bps[0]["verified"], true);
+    }
+
+    #[test]
+    fn set_exception_breakpoints_toggles_runtime() {
+        let mut s = Session::new();
+        // Filtro presente → liga.
+        let out = s.handle(&req(
+            "setExceptionBreakpoints",
+            &json!({ "filters": ["runtime"] }),
+        ));
+        assert!(has_command(&out, |c| matches!(
+            c,
+            Command::SetExceptionFilter { runtime: true }
+        )));
+        // Lista vazia → desliga.
+        let out = s.handle(&req("setExceptionBreakpoints", &json!({ "filters": [] })));
+        assert!(has_command(&out, |c| matches!(
+            c,
+            Command::SetExceptionFilter { runtime: false }
+        )));
+    }
+
+    #[test]
+    fn initialize_advertises_exception_filter() {
+        let mut s = Session::new();
+        let out = s.handle(&req("initialize", &Value::Null));
+        let filters = &first_response(&out).body["exceptionBreakpointFilters"];
+        assert_eq!(filters[0]["filter"], "runtime");
     }
 
     #[test]

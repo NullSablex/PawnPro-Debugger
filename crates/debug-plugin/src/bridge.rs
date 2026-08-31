@@ -183,5 +183,6 @@ fn apply(cmd: Command) {
             let _ = crate::hook::set_variable(frame, &name, index, value);
         }
         Command::SetDataBreakpoints { watches } => crate::hook::set_data_breakpoints(watches),
+        Command::SetExceptionFilter { runtime } => crate::hook::set_runtime_errors(runtime),
     }
 }

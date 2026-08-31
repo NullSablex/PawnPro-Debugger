@@ -74,6 +74,9 @@ pub enum Command {
     /// para resolvê-lo; enviado enquanto a VM está pausada (o editor arma o data
     /// breakpoint a partir do painel Variáveis).
     SetDataBreakpoints { watches: Vec<DataWatch> },
+    /// Liga/desliga a pausa em erros de runtime (filtro de exceção do editor).
+    /// `false` deixa a VM abortar normalmente, sem pausar antes.
+    SetExceptionFilter { runtime: bool },
 }
 
 /// Um data breakpoint pedido: a variável `name` em escopo no frame `frame`

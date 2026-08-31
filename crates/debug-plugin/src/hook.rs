@@ -11,6 +11,7 @@
 //! `extern "C"` callback and no manual `*mut AMX` poking anymore.
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use samp::debug::AmxDbg;
 use samp::prelude::Amx;
@@ -56,6 +57,15 @@ static OPCODE_MAP: Mutex<Option<OpcodeMap>> = Mutex::new(None);
 /// Padrão inglês até `set_locale` rodar no carregamento do plugin.
 static LOCALE: Mutex<Locale> = Mutex::new(Locale::En);
 
+/// Pausa em erro de runtime ligada? (filtro de exceção do editor). Ligado por
+/// padrão; o adaptador desliga via `Command::SetExceptionFilter`.
+static RUNTIME_ERRORS: AtomicBool = AtomicBool::new(true);
+
+/// Liga/desliga a pausa em erros de runtime (div-zero, bounds, STACKERR, …).
+pub fn set_runtime_errors(on: bool) {
+    RUNTIME_ERRORS.store(on, Ordering::Relaxed);
+}
+
 /// Define o idioma das mensagens de erro. Chamado no `on_load` a partir de
 /// `PAWNPRO_DBG_LOCALE` (que o adaptador propaga do editor).
 pub fn set_locale(locale: Locale) {
@@ -92,7 +102,9 @@ pub fn on_break(amx: &Amx) {
     // instruction (`raw_cip`, the one about to execute) will abort the VM, pause
     // now with reason "exception" — the VM's ABORT would otherwise return without
     // calling us again. Source line is still the current break's (`cip`).
-    if let Some(err) = detect_runtime_error(amx, raw_cip) {
+    if RUNTIME_ERRORS.load(Ordering::Relaxed)
+        && let Some(err) = detect_runtime_error(amx, raw_cip)
+    {
         if let Ok(mut ctrl) = STATE.lock() {
             ctrl.hit_breakpoint(); // clears any pending step; marks started
         }
