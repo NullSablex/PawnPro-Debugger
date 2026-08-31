@@ -401,14 +401,46 @@ impl Session {
         self.reply(req, body)
     }
 
-    /// `variables`: variáveis do frame referenciado. O `variablesReference` é o
-    /// `frameId` (1-based) definido no `scopes`; o índice do frame é `ref - 1`.
+    /// `variables`: variáveis do container referenciado. Se o `variablesReference`
+    /// é de um array (codificado), devolve os elementos; senão é um escopo de frame
+    /// (`ref - 1`) e devolve as variáveis de topo — arrays ganham um ref próprio
+    /// (não-zero) para o editor poder expandi-los.
     fn on_variables(&mut self, req: &Request) -> Vec<Outgoing> {
-        let frame = frame_index(req.arguments.get("variablesReference"));
-        let vars: Vec<Value> = crate::plugin_client::frame_vars(frame)
-            .into_iter()
-            .map(|v| json!({ "name": v.name, "value": v.value, "variablesReference": 0 }))
-            .collect();
+        let reference = req
+            .arguments
+            .get("variablesReference")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+
+        let vars: Vec<Value> = if let Some((frame, var_index)) = decode_array_ref(reference) {
+            // Elementos de um array (folhas, sem filhos).
+            crate::plugin_client::frame_vars(frame)
+                .get(var_index)
+                .map(|arr| {
+                    arr.children
+                        .iter()
+                        .map(|c| {
+                            json!({ "name": c.name, "value": c.value, "variablesReference": 0 })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            // Escopo do frame: variáveis de topo; arrays viram expansíveis.
+            let frame = frame_index(req.arguments.get("variablesReference"));
+            crate::plugin_client::frame_vars(frame)
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    let child_ref = if v.children.is_empty() {
+                        0
+                    } else {
+                        encode_array_ref(frame, i)
+                    };
+                    json!({ "name": v.name, "value": v.value, "variablesReference": child_ref })
+                })
+                .collect()
+        };
         let body = json!({ "variables": vars });
         self.reply(req, body)
     }
@@ -430,8 +462,11 @@ impl Session {
             .unwrap_or("")
             .trim()
             .to_string();
-        // O `variablesReference` do escopo identifica o frame (== frameId 1-based).
-        let frame = frame_index(req.arguments.get("variablesReference"));
+        let reference = req
+            .arguments
+            .get("variablesReference")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
 
         // Aceita inteiro (decimal/hex), float (`50.0`) e bool (`true`/`false`). O
         // valor enviado ao plugin é sempre uma célula i32 (float = bits IEEE-754,
@@ -447,17 +482,43 @@ impl Session {
             ))];
         };
 
-        // Arrays não são editáveis (o plugin os rejeita). Detectamos pelo valor
-        // atual em cache começar com `[` e falhamos AQUI, em vez de responder um
-        // sucesso falso e desencontrar o painel do estado real da VM.
+        // Edição de ELEMENTO de array: o `variablesReference` é o do array e o
+        // `name` é `[i]`. Resolve o nome do array e o índice, e edita a célula.
+        if let Some((frame, var_index)) = decode_array_ref(reference) {
+            let vars = crate::plugin_client::frame_vars(frame);
+            let (Some(arr), Some(i)) = (vars.get(var_index), parse_elem_index(&name)) else {
+                return vec![Outgoing::Response(Response::fail(
+                    seq,
+                    req,
+                    format!("elemento inválido: '{name}'"),
+                ))];
+            };
+            let array_name = arr.name.clone();
+            crate::plugin_client::update_array_elem(frame, var_index, i, &shown);
+            let body = json!({ "value": shown, "variablesReference": 0 });
+            return vec![
+                Outgoing::ToPlugin(Command::SetVariable {
+                    frame,
+                    name: array_name,
+                    index: Some(i),
+                    value,
+                }),
+                Outgoing::Response(Response::ok(seq, req, body)),
+            ];
+        }
+
+        // Escalar: o `variablesReference` é o escopo do frame (== frameId 1-based).
+        let frame = frame_index(req.arguments.get("variablesReference"));
+        // O array inteiro não é editável — o editor deve editar um elemento (que
+        // vem com seu próprio ref). Falha amigável se pedirem o container.
         let is_array = crate::plugin_client::frame_vars(frame)
             .iter()
-            .any(|v| v.name == name && v.value.trim_start().starts_with('['));
+            .any(|v| v.name == name && !v.children.is_empty());
         if is_array {
             return vec![Outgoing::Response(Response::fail(
                 seq,
                 req,
-                format!("'{name}' é um array; editar arrays ainda não é suportado"),
+                format!("'{name}' é um array; expanda e edite um elemento (ex.: {name}[0])"),
             ))];
         }
 
@@ -467,7 +528,12 @@ impl Session {
         crate::plugin_client::update_var(frame, &name, &shown);
         let body = json!({ "value": shown, "variablesReference": 0 });
         vec![
-            Outgoing::ToPlugin(Command::SetVariable { frame, name, value }),
+            Outgoing::ToPlugin(Command::SetVariable {
+                frame,
+                name,
+                index: None,
+                value,
+            }),
             Outgoing::Response(Response::ok(seq, req, body)),
         ]
     }
@@ -491,9 +557,8 @@ impl Session {
         let var = crate::plugin_client::frame_vars(frame)
             .into_iter()
             .find(|v| v.name == name);
-        let observable = var
-            .as_ref()
-            .is_some_and(|v| !v.value.trim_start().starts_with('['));
+        // Arrays (têm filhos) não são observáveis por data breakpoint ainda.
+        let observable = var.as_ref().is_some_and(|v| v.children.is_empty());
 
         let body = if observable {
             json!({
@@ -625,6 +690,37 @@ fn frame_index(reference: Option<&Value>) -> usize {
         .and_then(Value::as_i64)
         .and_then(|r| usize::try_from(r - 1).ok())
         .unwrap_or(0)
+}
+
+/// Base dos `variablesReference` de array — bem acima de qualquer id de frame
+/// (escopos de frame são 1..N). Codifica `(frame, índice-da-var)` para o editor
+/// expandir os elementos de um array e editá-los.
+const ARRAY_REF_BASE: i64 = 1_000_000;
+/// Máximo de variáveis por frame no esquema de codificação.
+const ARRAY_REF_STRIDE: i64 = 10_000;
+
+/// Codifica `(frame, var_index)` num `variablesReference` de array. Índices são
+/// pequenos; `try_from` protege contra estouro (retorna 0 no impossível).
+fn encode_array_ref(frame: usize, var_index: usize) -> i64 {
+    let frame = i64::try_from(frame).unwrap_or(0);
+    let var_index = i64::try_from(var_index).unwrap_or(0);
+    ARRAY_REF_BASE + frame * ARRAY_REF_STRIDE + var_index
+}
+
+/// Decodifica um `variablesReference` em `(frame, var_index)` se for de array;
+/// `None` para refs de escopo de frame (1..N).
+fn decode_array_ref(reference: i64) -> Option<(usize, usize)> {
+    let r = reference.checked_sub(ARRAY_REF_BASE).filter(|r| *r >= 0)?;
+    Some((
+        usize::try_from(r / ARRAY_REF_STRIDE).ok()?,
+        usize::try_from(r % ARRAY_REF_STRIDE).ok()?,
+    ))
+}
+
+/// Índice de um elemento a partir do nome do filho `"[i]"` (como montado na
+/// inspeção). `None` se não casar o formato.
+fn parse_elem_index(name: &str) -> Option<usize> {
+    name.strip_prefix('[')?.strip_suffix(']')?.parse().ok()
 }
 
 /// Decodifica um `dataId` (`"frame:name"`, montado no `dataBreakpointInfo`) de
@@ -882,6 +978,26 @@ mod tests {
         assert_eq!(frame_index(Some(&json!(3))), 2);
         assert_eq!(frame_index(None), 0);
         assert_eq!(frame_index(Some(&json!(0))), 0); // inválido → topo
+    }
+
+    #[test]
+    fn array_ref_encode_decode_roundtrip() {
+        // Refs de array ficam acima de qualquer id de frame e decodificam de volta.
+        let r = encode_array_ref(2, 5);
+        assert!(r >= ARRAY_REF_BASE);
+        assert_eq!(decode_array_ref(r), Some((2, 5)));
+        assert_eq!(decode_array_ref(encode_array_ref(0, 0)), Some((0, 0)));
+        // Refs de escopo de frame (1..N) não são de array.
+        assert_eq!(decode_array_ref(1), None);
+        assert_eq!(decode_array_ref(9), None);
+    }
+
+    #[test]
+    fn parse_elem_index_reads_bracketed() {
+        assert_eq!(parse_elem_index("[0]"), Some(0));
+        assert_eq!(parse_elem_index("[42]"), Some(42));
+        assert_eq!(parse_elem_index("x"), None);
+        assert_eq!(parse_elem_index("[a]"), None);
     }
 
     #[test]

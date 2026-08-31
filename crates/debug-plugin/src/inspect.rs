@@ -21,21 +21,26 @@ pub fn collect(dbg: &AmxDbg, reader: &impl CellReader, cip: u32, frm: i32) -> Ve
     for sym in dbg.symbols_in_scope(cip) {
         // Effective data-segment address (global vs frame-relative) via the SDK.
         let addr = sym.effective_address(frm);
-        let value = if sym.is_array() {
-            format_array(sym, addr, reader)
+        out.push(if sym.is_array() {
+            build_array(sym, addr, reader, dbg)
         } else {
-            reader.read_cell(addr).map_or_else(
+            let value = reader.read_cell(addr).map_or_else(
                 || "?".to_string(),
                 |c| format_scalar(c, dbg.tag_name(sym.tag)),
-            )
-        };
-        out.push(Var {
-            name: sym.name.clone(),
-            value,
+            );
+            Var {
+                name: sym.name.clone(),
+                value,
+                children: vec![],
+            }
         });
     }
     out
 }
+
+/// Máximo de elementos de array expostos (evita despejar arrays enormes na
+/// inspeção). Os primeiros `MAX_ELEMS`; o resto fica indicado por `…` no resumo.
+const MAX_ELEMS: u32 = 256;
 
 /// Formata um valor escalar conforme o tag do símbolo. Em Pawn todo valor é um
 /// cell de 32 bits; o tag diz como interpretá-lo:
@@ -55,28 +60,104 @@ fn format_scalar(cell: i32, tag: Option<&str>) -> String {
     }
 }
 
-/// Formato compacto de um array: `[a, b, c, …]` até um limite, evitando despejar
-/// arrays enormes na inspeção.
-fn format_array(sym: &samp::debug::DbgSymbol, base: i32, reader: &impl CellReader) -> String {
-    const MAX: u32 = 8;
+/// Monta a [`Var`] de um array: lê os elementos (até [`MAX_ELEMS`]) como filhos
+/// expansíveis e resume o valor. Se as células formam uma string terminada em
+/// zero (texto), o resumo vira `"texto"`; senão, `[a, b, c, …]`.
+fn build_array(
+    sym: &samp::debug::DbgSymbol,
+    base: i32,
+    reader: &impl CellReader,
+    dbg: &AmxDbg,
+) -> Var {
+    let tag = dbg.tag_name(sym.tag);
     let len = sym.dims.first().map_or(0, |d| d.size);
-    let show = len.min(MAX);
-    let mut parts = Vec::new();
+    let show = len.min(MAX_ELEMS);
+
+    let mut cells = Vec::with_capacity(show as usize);
+    let mut children = Vec::with_capacity(show as usize);
     for i in 0..show {
         let addr = base.wrapping_add(i32::try_from(i).unwrap_or(0) * 4);
-        match reader.read_cell(addr) {
-            Some(c) => parts.push(c.to_string()),
-            None => parts.push("?".to_string()),
-        }
+        let cell = reader.read_cell(addr);
+        cells.push(cell);
+        children.push(Var {
+            name: format!("[{i}]"),
+            value: cell.map_or_else(|| "?".to_string(), |c| format_scalar(c, tag)),
+            children: vec![],
+        });
     }
-    let ellipsis = if len > show { ", …" } else { "" };
-    format!("[{}{}]", parts.join(", "), ellipsis)
+
+    // Resumo: string (se parecer texto terminado em zero) ou prévia numérica.
+    let value = as_string(&cells).map_or_else(
+        || {
+            const PREVIEW: usize = 8;
+            let parts: Vec<String> = cells
+                .iter()
+                .take(PREVIEW)
+                .map(|c| c.map_or_else(|| "?".to_string(), |v| v.to_string()))
+                .collect();
+            let ellipsis = if len as usize > parts.len() {
+                ", …"
+            } else {
+                ""
+            };
+            format!("[{}{}]", parts.join(", "), ellipsis)
+        },
+        |s| format!("\"{s}\""),
+    );
+
+    Var {
+        name: sym.name.clone(),
+        value,
+        children,
+    }
+}
+
+/// Interpreta as células como uma string do Pawn: caracteres imprimíveis até um
+/// terminador `0`. `None` se qualquer célula for ilegível/não-imprimível ou não
+/// houver terminador — conservador, para não mostrar array de inteiros como texto.
+/// Decodifica em Latin-1 (aproxima o Windows-1252 do SA-MP nos acentos).
+fn as_string(cells: &[Option<i32>]) -> Option<String> {
+    let mut s = String::new();
+    for cell in cells {
+        let c = (*cell)?;
+        if c == 0 {
+            return (!s.is_empty()).then_some(s); // terminador → fim da string
+        }
+        let b = u8::try_from(c).ok()?;
+        let printable = (0x20..=0x7e).contains(&b) || (0xa0..=0xff).contains(&b);
+        if !printable {
+            return None;
+        }
+        s.push(char::from(b));
+    }
+    None // sem terminador na faixa lida → não trata como string
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn as_string_detects_terminated_text() {
+        // "Oi" + terminador → string.
+        let cells = vec![Some(79), Some(105), Some(0), Some(120)];
+        assert_eq!(as_string(&cells), Some("Oi".to_string()));
+        // Latin-1 (acento): 'á' = 0xE1.
+        assert_eq!(as_string(&[Some(0xE1), Some(0)]), Some("á".to_string()));
+    }
+
+    #[test]
+    fn as_string_conservative() {
+        // Sem terminador na faixa → não é string.
+        assert_eq!(as_string(&[Some(72), Some(105)]), None);
+        // Caractere não-imprimível (7 = BEL) → não é string.
+        assert_eq!(as_string(&[Some(72), Some(7), Some(0)]), None);
+        // Célula ilegível → não é string.
+        assert_eq!(as_string(&[Some(72), None, Some(0)]), None);
+        // Só o terminador (vazio) → não é string.
+        assert_eq!(as_string(&[Some(0)]), None);
+    }
 
     #[test]
     fn format_scalar_by_tag() {

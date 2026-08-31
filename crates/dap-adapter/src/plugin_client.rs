@@ -237,3 +237,17 @@ pub fn update_var(frame: usize, name: &str, value: &str) {
         v.value = value.to_string();
     }
 }
+
+/// Atualiza no cache o elemento `elem` do array de índice `var_index` no frame
+/// dado (após editar `arr[elem]` via `setVariable`), para o painel refletir sem
+/// reler a VM.
+pub fn update_array_elem(frame: usize, var_index: usize, elem: usize, value: &str) {
+    if let Ok(mut g) = LAST_FRAMES.lock()
+        && let Some(child) = g
+            .get_mut(frame)
+            .and_then(|f| f.vars.get_mut(var_index))
+            .and_then(|arr| arr.children.get_mut(elem))
+    {
+        child.value = value.to_string();
+    }
+}

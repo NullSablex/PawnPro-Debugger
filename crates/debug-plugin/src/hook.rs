@@ -361,14 +361,15 @@ fn resolve_data_watches(reqs: Vec<pawnpro_dbg_protocol::DataWatch>) -> Vec<DataW
         .collect()
 }
 
-/// Edits a simple variable in scope in the given stack `frame` (0 = top) at the
-/// current pause: writes `value` to its cell via the SDK's bounds-checked
-/// `Amx::write_cell`. Returns `Some(value)` on success, `None` if there is no
-/// active pause, the frame index is out of range, the variable is not in scope, is
-/// an array (unsupported) or the address is inaccessible. Called by the socket
-/// thread while the VM is paused.
+/// Edits a variable in scope in the given stack `frame` (0 = top) at the current
+/// pause: writes `value` to its cell via the SDK's bounds-checked `Amx::write_cell`.
+/// `index` targets an array element (`arr[index]`); `None` edits a scalar. Returns
+/// `Some(value)` on success, `None` if there is no active pause, the frame index is
+/// out of range, the variable is not in scope, is a scalar edited with an index (or
+/// an array edited without one, or the index is out of bounds), or the address is
+/// inaccessible. Called by the socket thread while the VM is paused.
 #[must_use]
-pub fn set_variable(frame: usize, name: &str, value: i32) -> Option<i32> {
+pub fn set_variable(frame: usize, name: &str, index: Option<usize>, value: i32) -> Option<i32> {
     let (amx_usize, cip, frm) = {
         let guard = PAUSE_CTX.lock().ok()?;
         let (amx_usize, frames) = guard.as_ref()?;
@@ -382,17 +383,28 @@ pub fn set_variable(frame: usize, name: &str, value: i32) -> Option<i32> {
 
     let guard = DBG.lock().ok()?;
     let dbg = guard.as_ref()?;
-    // Find the in-scope symbol with this name; arrays are not editable here.
     let sym = dbg
         .symbols_in_scope(cip)
         .into_iter()
         .find(|s| s.name == name)?;
-    if sym.is_array() {
-        return None;
-    }
-    if amx.write_cell(sym.effective_address(frm), value) {
-        Some(value)
+
+    // Endereço-alvo: elemento `index` de um array, ou a célula de um escalar.
+    let addr = if let Some(i) = index {
+        if !sym.is_array() {
+            return None; // índice pedido em algo que não é array
+        }
+        let len = usize::try_from(sym.dims.first().map_or(0, |d| d.size)).unwrap_or(0);
+        if i >= len {
+            return None; // fora do limite do array
+        }
+        sym.effective_address(frm)
+            .wrapping_add(i32::try_from(i).ok()?.wrapping_mul(4))
     } else {
-        None
-    }
+        if sym.is_array() {
+            return None; // array precisa de índice (o array inteiro não é editável)
+        }
+        sym.effective_address(frm)
+    };
+
+    amx.write_cell(addr, value).then_some(value)
 }

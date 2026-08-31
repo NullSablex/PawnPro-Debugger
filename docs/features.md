@@ -7,9 +7,9 @@
 | Hit count | :material-check: | `N`, `==N`, `>=N`, `<=N`, `>N`, `<N`, `%N`. |
 | Logpoints | :material-check: | Mensagem com `{variável}` interpolada, sem pausar. |
 | Step in / over / out | :material-check: | |
-| Inspeção de variáveis | :material-check: | int, `Float:`, `bool:`, array, hex — em escopo. |
+| Inspeção de variáveis | :material-check: | int, `Float:`, `bool:`, hex; arrays **expansíveis** (elementos como filhos) e arrays de char como **string** — em escopo. |
 | Watch / hover | :material-check: | |
-| Editar variável | :material-check: | Durante a pausa (`setVariable`). |
+| Editar variável | :material-check: | Durante a pausa (`setVariable`), inclusive **elementos de array** (`arr[i]`). |
 | Pausar em erro de runtime | :material-check: | Divisão por zero, índice fora do limite, colisão pilha/heap, underflow de heap e acesso inválido à memória; pausa na linha, antes do abort. SA-MP e open.mp. Ver [Pausa no erro](runtime-errors.md). |
 | Mensagens localizadas | :material-check: | pt-BR, en, es, ro, ru (segue o idioma do editor). |
 | Call stack multi-frame | :material-check: | Caminha a cadeia de frames (FRM→retorno); nome da função, linha e variáveis por frame. |

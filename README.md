@@ -13,9 +13,9 @@ desenvolvimento.
 | Hit count | ✅ | `N`, `==N`, `>=N`, `<=N`, `>N`, `<N`, `%N`. |
 | Logpoints | ✅ | Mensagem com `{variável}` interpolada, sem pausar. |
 | Step in / over / out | ✅ | |
-| Inspeção de variáveis | ✅ | int, `Float:`, `bool:`, array, hex — em escopo. |
+| Inspeção de variáveis | ✅ | int, `Float:`, `bool:`, hex; arrays **expansíveis** (elementos como filhos) e arrays de char mostrados como **string** — em escopo. |
 | Watch / hover | ✅ | |
-| Editar variável | ✅ | Durante a pausa (`setVariable`). |
+| Editar variável | ✅ | Durante a pausa (`setVariable`), inclusive **elementos de array** (`arr[i]`). |
 | Pausar em erro de runtime | ✅ | Divisão por zero, índice fora do limite, colisão pilha/heap, underflow de heap e acesso inválido à memória; pausa na linha, antes do abort. SA-MP e open.mp. |
 | Mensagens localizadas | ✅ | pt-BR, en, es, ro, ru (segue o idioma do editor). |
 | Call stack multi-frame | ✅ | Caminha a cadeia de frames (FRM→retorno); nome da função, linha e variáveis por frame. |

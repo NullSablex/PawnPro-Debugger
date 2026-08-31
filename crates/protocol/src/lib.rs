@@ -63,6 +63,10 @@ pub enum Command {
     SetVariable {
         frame: usize,
         name: String,
+        /// Índice do elemento, quando a variável é um array (`arr[index]`);
+        /// `None` edita um escalar.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        index: Option<usize>,
         value: i32,
     },
     /// Substitui o conjunto de data breakpoints (pausar quando uma variável muda).
@@ -103,11 +107,15 @@ pub enum Event {
     Exited,
 }
 
-/// Um par variável→valor para a inspeção.
+/// Um par variável→valor para a inspeção. Arrays trazem os elementos em
+/// `children` (expansíveis na árvore do editor); escalares têm `children` vazio.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Var {
     pub name: String,
     pub value: String,
+    /// Elementos de um array (`[0]`, `[1]`, …); vazio para escalares.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<Var>,
 }
 
 /// Um frame da pilha de chamadas na pausa. `name` é o nome da função (resolvido
@@ -166,7 +174,14 @@ mod tests {
             Command::SetVariable {
                 frame: 1,
                 name: "x".into(),
+                index: None,
                 value: 7,
+            },
+            Command::SetVariable {
+                frame: 0,
+                name: "arr".into(),
+                index: Some(2),
+                value: 9,
             },
             Command::SetDataBreakpoints {
                 watches: vec![
@@ -199,6 +214,7 @@ mod tests {
                     vars: vec![Var {
                         name: "g".into(),
                         value: "1".into(),
+                        children: vec![],
                     }],
                 }],
                 description: None,
