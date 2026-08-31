@@ -82,6 +82,7 @@ nav:
   - Interno:
       - Arquitetura: architecture.md
       - Como funciona a pausa no erro: runtime-errors.md
+      - Localização (i18n): i18n.md
 
 extra:
   social:
