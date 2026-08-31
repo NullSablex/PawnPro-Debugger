@@ -18,6 +18,7 @@
 
 <p align="center">
   <a href="https://pawnpro-debugger.nullsablex.com/">Documentação</a> ·
+  <a href="https://pawnpro-debugger.nullsablex.com/en-US/">English</a> ·
   <a href="https://pawnpro-debugger.nullsablex.com/getting-started/">Começando</a> ·
   <a href="https://github.com/NullSablex/PawnPro-Debugger/releases">Releases</a> ·
   <a href="https://github.com/NullSablex/PawnPro">Extensão PawnPro</a>
