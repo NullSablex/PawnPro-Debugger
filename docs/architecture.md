@@ -17,9 +17,9 @@ dap-adapter  ──lança──►  servidor SA-MP/open.mp
 
 | Crate | Tipo | Papel |
 |-------|------|-------|
-| `protocol` | `lib` | Tipos compartilhados do IPC plugin ↔ adaptador (comandos e eventos em NDJSON sobre socket local). |
-| `debug-plugin` | `cdylib` | Carregado pelo servidor. Instala o debug hook, decide pausar (breakpoint/step/erro), coleta variáveis e bloqueia a VM até o editor mandar continuar. |
-| `dap-adapter` | `bin` | Traduz DAP ↔ protocolo próprio. Lança o servidor como processo filho (morre junto), repassa breakpoints e eventos. |
+| `protocol` | `lib` | Tipos compartilhados do IPC plugin ↔ adaptador (comandos e eventos em NDJSON sobre socket local) e as [mensagens localizadas](i18n.md). |
+| `debug-plugin` | `cdylib` | Carregado pelo servidor. Instala o debug hook, decide pausar (breakpoint/step/data breakpoint/erro), caminha a pilha, coleta variáveis, lê e escreve a memória de dados, e bloqueia a VM até o editor mandar continuar. |
+| `dap-adapter` | `bin` | Traduz DAP ↔ protocolo próprio. Lança o servidor como processo filho (morre junto), repassa breakpoints e eventos, e avalia as expressões do watch/console. |
 
 ## SDK compartilhado
 
@@ -39,10 +39,23 @@ Usar o SDK como fonte única evita duplicar o parser entre o plugin e o adaptado
 ## Fluxo de uma pausa
 
 1. A VM chama o debug hook a cada linha (`.amx` compilado com `-d3`).
-2. O plugin decide pausar (breakpoint/condição/hit-count/step/erro de runtime).
-3. Coleta as variáveis em escopo e envia um evento ao adaptador.
+2. O plugin decide pausar (breakpoint/condição/hit-count/step/data breakpoint/erro
+   de runtime).
+3. Coleta as variáveis em escopo e os frames da pilha, e envia um evento ao
+   adaptador.
 4. **Bloqueia** a VM (o servidor congela — esperado em dev) até o editor mandar
    continuar/step.
+
+## Direção das mensagens
+
+O protocolo é assíncrono nos dois sentidos: o adaptador manda **comandos**
+(breakpoints, step, continuar, editar variável) e o plugin manda **eventos**
+(pausa, log, saída). Nada espera resposta — exceto uma via:
+
+`Command::ReadMemory` ↔ `Event::MemoryData` é um par **request/response**,
+correlacionado por um `id` sequencial. O adaptador registra o pedido pendente, a
+thread leitora do socket entrega os bytes ao chamador que espera, e um **timeout**
+descarta o pendente se o plugin não responder — a sessão nunca fica presa.
 
 ## Compilação
 

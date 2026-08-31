@@ -8,6 +8,25 @@ Podem existir falhas ou itens não declarados, causados por falha humana ou por 
 
 ---
 
+## [Não lançado]
+
+### Adicionado
+- **Call stack multi-frame** — o plugin caminha a cadeia de frames do AMX (FRM → endereço de retorno) e entrega nome da função, linha e variáveis de cada frame; o editor navega entre eles e a inspeção segue o frame selecionado.
+- **Breakpoints de função** — parar ao entrar numa função pelo nome. O adaptador resolve o nome no bloco `AMX_DBG` e envia ao plugin a união dos breakpoints de linha e de função; nome que não resolve volta como não verificado.
+- **Data breakpoints** — pausar quando um valor muda, em globais, locais e **elementos de array** (`arr[3]`). Watches de locais expiram quando o frame dono retorna, para não disparar com o lixo de outro frame no mesmo slot; endereço ilegível não gera disparo.
+- **Inspeção rica de arrays e strings** — arrays são expansíveis (cada elemento vira um filho) e arrays de char são resumidos como **string** quando o conteúdo parece texto terminado em zero.
+- **`setExpression`** — editar um lvalue (`x = 1`, `arr[i] = 10`) direto no watch ou no console, com o índice podendo ser uma subexpressão. O array inteiro não é editável, só os elementos.
+- **`readMemory`** — hex view da memória de dados crua a partir de qualquer variável: cada variável passa a expor um `memoryReference`, e o adaptador devolve os bytes em base64 (encoder próprio, sem dependência nova).
+- **Autocomplete** (`completions`) — sugestão de variáveis em escopo no watch e no console.
+- **Filtro de exceção** — o editor liga e desliga a pausa em erros de runtime pelo painel de breakpoints.
+- **Mais erros de runtime** — `STACKERR` (colisão pilha/heap), `HEAPLOW` (underflow de heap) e `MEMACCESS` (acesso inválido à memória), com simulação fiel ao `amx.c` e conservadora: o rastreio de `pri`/`alt`/`stk`/`hea` perde a confiança ao primeiro opcode não modelado, então nunca há falso-positivo.
+- **Avaliador de expressões** para watch/hover — um operador de topo com `+ - * / %` (semântica de truncamento do Pawn) e `== != < > <= >=`, sobre literais, variáveis e `arr[i]`.
+
+### Alterado
+- **Mensagens localizadas centralizadas** em `crates/protocol/src/messages` — `Locale`, as 11 `MsgKey` e uma tabela por idioma (pt-BR, en, es, ro, ru), compartilhadas pelo plugin e pelo adaptador. O `match` por chave é exaustivo: idioma incompleto não compila.
+- **Primeiro canal request/response do protocolo** — `Command::ReadMemory` ↔ `Event::MemoryData`, correlacionados por `id` e com timeout, sem prender a sessão se o plugin não responder.
+- Documentação reescrita: `README.md`, `docs/features.md`, `docs/architecture.md`, `docs/index.md` e a nova página de [localização](docs/i18n.md), com a meta de 50 idiomas.
+
 ## [0.1.0] - 04/07/2026
 
 Primeiro pré-lançamento (pre-release).
