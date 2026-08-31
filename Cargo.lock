@@ -233,7 +233,7 @@ dependencies = [
 [[package]]
 name = "rust-samp"
 version = "3.3.0"
-source = "git+https://github.com/NullSablex/rust-samp?rev=3d15a19#3d15a19a41965f0ec557b2699d5a1e5c7ca245d5"
+source = "git+https://github.com/NullSablex/rust-samp?rev=900ebd0#900ebd0f73ec5351a17428d1ea77032413383b1a"
 dependencies = [
  "fern",
  "log",
@@ -246,7 +246,7 @@ dependencies = [
 [[package]]
 name = "rust-samp-codegen"
 version = "1.4.0"
-source = "git+https://github.com/NullSablex/rust-samp?rev=3d15a19#3d15a19a41965f0ec557b2699d5a1e5c7ca245d5"
+source = "git+https://github.com/NullSablex/rust-samp?rev=900ebd0#900ebd0f73ec5351a17428d1ea77032413383b1a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -256,7 +256,7 @@ dependencies = [
 [[package]]
 name = "rust-samp-sdk"
 version = "3.3.0"
-source = "git+https://github.com/NullSablex/rust-samp?rev=3d15a19#3d15a19a41965f0ec557b2699d5a1e5c7ca245d5"
+source = "git+https://github.com/NullSablex/rust-samp?rev=900ebd0#900ebd0f73ec5351a17428d1ea77032413383b1a"
 dependencies = [
  "bitflags 2.13.0",
 ]
