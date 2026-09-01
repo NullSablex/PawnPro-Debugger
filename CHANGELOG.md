@@ -8,7 +8,7 @@ Podem existir falhas ou itens não declarados, causados por falha humana ou por 
 
 ---
 
-## [0.2.0] - 31/08/2026
+## [0.2.0] - 01/09/2026
 
 Segundo pré-lançamento. Amplia o conjunto DAP suportado: a depuração deixa de ser
 "breakpoint e inspeção" e passa a cobrir call stack, data breakpoints, edição por
