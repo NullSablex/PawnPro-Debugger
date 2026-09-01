@@ -27,10 +27,16 @@ O parser do formato `AMX_DBG` (endereço ↔ linha ↔ símbolo ↔ função) e 
 primitivas de VM vêm do SDK [`rust-samp`](https://rust-samp.nullsablex.com/):
 
 - `samp::debug` / `samp_sdk::debug` — parser do bloco de debug.
-- `Amx::cip/frame/stack/heap/stp/pri/alt` — registradores da VM.
+- `Amx::cip/frame/stack/heap/hlw/stp/pri/alt` — registradores da VM.
 - `Amx::read_cell/write_cell` — dados (inspecionar/editar variáveis).
-- `Amx::read_code` / `Amx::opcode_table` — código (decodificar opcodes; ver
-  [Pausa no erro](runtime-errors.md)).
+- `Amx::read_bytes` — faixa de memória crua (o hex view do `readMemory`).
+- `Amx::read_code` / `Amx::opcode_map` — código e a decodificação de opcodes sob
+  relocação (ver [Pausa no erro](runtime-errors.md)).
+- `samp::debug::opcode` — numeração dos opcodes, `STK_MARGIN` e o tamanho de
+  cada instrução (`operand_cells`), que a varredura da linha usa para avançar.
+- `samp::debug::stack::walk` / `Amx::call_stack` — caminhada da cadeia de frames.
+- `Amx::data_only` — embrulha a VM pausada para acesso só de dados, sem tabela
+  de funções (é a situação da thread do socket durante a pausa).
 
 Usar o SDK como fonte única evita duplicar o parser entre o plugin e o adaptador
 (o adaptador depende do `rust-samp-sdk` com `default-features = false, features =

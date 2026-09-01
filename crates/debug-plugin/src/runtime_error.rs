@@ -20,72 +20,16 @@
 //! essa tabela (ponteiro → opcode). Em imagens não-relocadas, o valor já é o
 //! número.
 
-use std::collections::HashMap;
-
-/// Números de opcode da VM AMX (ordem do enum em `amx.c`). Só os que o simulador
-/// de linha consome (efeito em `pri`/`alt`) ou detecta.
-pub const OP_LOAD_PRI: i32 = 1; // pri = data[offs]
-pub const OP_LOAD_ALT: i32 = 2; // alt = data[offs]
-pub const OP_LOAD_S_PRI: i32 = 3; // pri = data[frm+offs]
-pub const OP_LOAD_S_ALT: i32 = 4; // alt = data[frm+offs]
-pub const OP_CONST_PRI: i32 = 11;
-pub const OP_CONST_ALT: i32 = 12;
-pub const OP_MOVE_PRI: i32 = 33; // pri = alt
-pub const OP_MOVE_ALT: i32 = 34; // alt = pri
-pub const OP_XCHG: i32 = 35;
-pub const OP_PUSH_PRI: i32 = 36;
-pub const OP_PUSH_ALT: i32 = 37;
-pub const OP_PUSH_C: i32 = 39;
-pub const OP_POP_PRI: i32 = 42;
-pub const OP_POP_ALT: i32 = 43;
-pub const OP_SDIV: i32 = 73;
-pub const OP_SDIV_ALT: i32 = 74;
-pub const OP_UDIV: i32 = 76;
-pub const OP_UDIV_ALT: i32 = 77;
-pub const OP_ZERO_PRI: i32 = 89;
-pub const OP_ZERO_ALT: i32 = 90;
-pub const OP_BOUNDS: i32 = 121;
-pub const OP_BREAK: i32 = 137;
-// Opcodes de endereço/memória e pilha/heap, para os erros STACKERR/HEAPLOW/
-// MEMACCESS (números conferidos na `amx_opcodelist` do interpretador).
-pub const OP_LOAD_I: i32 = 9; // pri = data[pri]
-pub const OP_LODB_I: i32 = 10; // pri = data[pri] (byte/word)
-pub const OP_ADDR_PRI: i32 = 13; // pri = frm + offs
-pub const OP_ADDR_ALT: i32 = 14; // alt = frm + offs
-pub const OP_STOR_I: i32 = 23; // data[alt] = pri
-pub const OP_STRB_I: i32 = 24; // data[alt] = pri (byte/word)
-pub const OP_LIDX: i32 = 25; // pri = data[pri*4 + alt]
-pub const OP_LIDX_B: i32 = 26; // pri = data[(pri<<n) + alt]
-pub const OP_IDXADDR: i32 = 27; // pri = pri*4 + alt
-pub const OP_IDXADDR_B: i32 = 28; // pri = (pri<<n) + alt
-pub const OP_PUSH_R: i32 = 38; // empilha pri, offs vezes
-pub const OP_PUSH: i32 = 40; // empilha data[offs]
-pub const OP_PUSH_S: i32 = 41; // empilha data[frm+offs]
-pub const OP_STACK: i32 = 44; // alt=stk; stk += offs
-pub const OP_HEAP: i32 = 45; // alt=hea; hea += offs
-pub const OP_PROC: i32 = 46; // empilha frm; frm=stk
-pub const OP_CALL: i32 = 49; // empilha retorno; salta
-pub const OP_CALL_PRI: i32 = 50;
-pub const OP_PUSH_ADR: i32 = 133; // empilha frm+offs
-/// Faixa dos opcodes compostos `push2`..`push5` (empilham 2..5 valores).
-pub const OP_PUSH2_C: i32 = 138;
-pub const OP_PUSH5_ADR: i32 = 153;
-/// Margem de segurança pilha↔heap do `amx.c` (`STKMARGIN` = 16 cells).
-const STK_MARGIN: i32 = 16 * 4;
-/// Total de opcodes (`OP_NUM_OPCODES`) — tamanho da `amx_opcodelist`.
-pub const OP_NUM_OPCODES: usize = 158;
-
-/// Nº de cells de parâmetro inline de cada opcode (gerado de `amx_BrowseRelocate`
-/// em `amx.c`). `99` = tamanho variável (CASETBL/SWITCH/inválido) → a varredura
-/// para por segurança ao encontrá-lo.
-#[rustfmt::skip]
-const OP_PARAMS: [u8; OP_NUM_OPCODES] = [
-    99,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,1,1,1,1,0,0,0,
-    0,0,1,1,1,1,0,0,1,1,0,0,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,1,1,1,1,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0,1,1,0,
-    0,1,1,0,0,0,1,1,0,1,1,1,1,1,0,1,0,0,0,0,0,99,99,0,0,1,0,2,1,0,2,2,2,2,3,
-    3,3,3,4,4,4,4,5,5,5,5,2,2,2,2,
-];
+// Opcodes, tamanhos de instrução e `STK_MARGIN` vêm do SDK
+// (`samp::debug::opcode`), fonte única compartilhada com o adaptador.
+use samp::debug::opcode::{
+    OP_ADDR_ALT, OP_ADDR_PRI, OP_BOUNDS, OP_BREAK, OP_CALL, OP_CALL_PRI, OP_CONST_ALT,
+    OP_CONST_PRI, OP_HEAP, OP_IDXADDR, OP_IDXADDR_B, OP_LIDX, OP_LIDX_B, OP_LOAD_ALT, OP_LOAD_I,
+    OP_LOAD_PRI, OP_LOAD_S_ALT, OP_LOAD_S_PRI, OP_LODB_I, OP_MOVE_ALT, OP_MOVE_PRI, OP_POP_ALT,
+    OP_POP_PRI, OP_PROC, OP_PUSH, OP_PUSH_ADR, OP_PUSH_ALT, OP_PUSH_C, OP_PUSH_PRI, OP_PUSH_R,
+    OP_PUSH_S, OP_PUSH2_C, OP_PUSH5_ADR, OP_SDIV, OP_SDIV_ALT, OP_STACK, OP_STOR_I, OP_STRB_I,
+    OP_UDIV, OP_UDIV_ALT, OP_XCHG, OP_ZERO_ALT, OP_ZERO_PRI, STK_MARGIN, operand_cells,
+};
 
 // Idioma das mensagens: definido uma vez no protocolo (compartilhado com o
 // adaptador). Re-exportado para os usos internos do plugin.
@@ -137,48 +81,6 @@ impl RuntimeError {
 #[must_use]
 fn mem_invalid(addr: i32, hea: i32, stk: i32, stp: i32) -> bool {
     (addr >= hea && addr < stk) || addr.cast_unsigned() >= stp.cast_unsigned()
-}
-
-/// Traduz o valor cru lido do code segment (via `read_code`) no número do opcode.
-pub struct OpcodeMap {
-    /// `endereço do label → número do opcode`. Vazio = imagem não relocada.
-    inverse: HashMap<usize, i32>,
-}
-
-impl OpcodeMap {
-    /// Constrói o mapa a partir da `amx_opcodelist` (de `Amx::opcode_table`).
-    #[must_use]
-    pub fn new(opcode_table: Option<Vec<usize>>) -> Self {
-        let inverse = opcode_table
-            .map(|table| {
-                table
-                    .into_iter()
-                    .enumerate()
-                    .map(|(op, addr)| (addr, i32::try_from(op).unwrap_or(-1)))
-                    .collect()
-            })
-            .unwrap_or_default();
-        Self { inverse }
-    }
-
-    /// Opcode real a partir do valor cru em `code[cip]`. Resolve o endereço de
-    /// label (computed-goto) ou aceita um número de opcode pequeno (não relocado).
-    /// `None` se não for nenhum dos dois.
-    #[must_use]
-    pub fn decode(&self, raw: i32) -> Option<i32> {
-        if self.inverse.is_empty() {
-            return Some(raw);
-        }
-        if let Some(&op) = self
-            .inverse
-            .get(&usize::try_from(raw.cast_unsigned()).ok()?)
-        {
-            return Some(op);
-        }
-        (0..i32::try_from(OP_NUM_OPCODES).ok()?)
-            .contains(&raw)
-            .then_some(raw)
-    }
 }
 
 /// Estado simulado dos registradores durante a varredura de uma linha.
@@ -246,7 +148,7 @@ pub fn scan_line(
         if op == OP_BREAK {
             return None;
         }
-        let nparams = u32::from(*OP_PARAMS.get(usize::try_from(op).ok()?)?);
+        let nparams = u32::from(operand_cells(op)?);
         if nparams == 99 {
             return None; // tamanho variável → não dá para avançar com segurança
         }
@@ -495,6 +397,8 @@ pub fn scan_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use samp::debug::OpcodeMap;
+    use samp::debug::opcode::OP_NUM_OPCODES;
 
     /// Monta um "code segment" a partir de uma lista de (opcode, params...).
     fn code(instrs: &[&[i32]]) -> Vec<i32> {

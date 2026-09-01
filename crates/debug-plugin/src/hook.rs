@@ -20,10 +20,11 @@ use crate::control::{
 };
 use crate::gate::Resume;
 use crate::inspect::{self, CellReader};
-use crate::runtime_error::{self, Locale, OP_NUM_OPCODES, OpcodeMap};
-use crate::stack;
+use crate::runtime_error::{self, Locale};
 use pawnpro_dbg_protocol::{Breakpoint, Event, Frame};
+use samp::debug::OpcodeMap;
 use samp::debug::VClass;
+use samp::debug::stack;
 
 /// Tamanho (bytes) de uma instrução AMX. No hook, o `cip` aponta para a célula
 /// SEGUINTE ao `OP_BREAK`; voltamos isto para chegar ao endereço da linha.
@@ -255,9 +256,8 @@ pub fn load_debug(dbg: AmxDbg) {
 /// Monta o mapa de opcodes desta VM (inverso de `amx_opcodelist` numa imagem
 /// relocada), para a detecção de erro de runtime. Uma vez por VM, no `on_amx_load`.
 pub fn load_opcode_map(amx: &Amx) {
-    let map = OpcodeMap::new(amx.opcode_table(OP_NUM_OPCODES));
     if let Ok(mut guard) = OPCODE_MAP.lock() {
-        *guard = Some(map);
+        *guard = Some(amx.opcode_map());
     }
 }
 
@@ -336,7 +336,7 @@ fn read_memory_inner(
     count: usize,
 ) -> Option<Vec<u8>> {
     let (amx_usize, frames) = PAUSE_CTX.lock().ok().and_then(|g| g.clone())?;
-    let amx = Amx::new(amx_usize as *mut samp::raw::types::AMX, 0);
+    let amx = Amx::data_only(amx_usize as *mut samp::raw::types::AMX);
     let (cip, frm) = *frames.get(frame)?;
     let guard = DBG.lock().ok()?;
     let dbg = guard.as_ref()?;
@@ -353,21 +353,9 @@ fn read_memory_inner(
     }
     let start = i32::try_from(i64::from(base) + offset).ok()?;
 
-    // `read_cell` lê cells de 4 bytes alinhadas; alinha para baixo e pula o resto.
-    let aligned = start & !3;
-    let skip = usize::try_from(start - aligned).ok()?;
-    let mut out = Vec::with_capacity(skip + count);
-    let mut addr = aligned;
-    while out.len() < skip + count {
-        let Some(cell) = amx.read_cell(addr) else {
-            break; // endereço inacessível: devolve o que leu até aqui
-        };
-        out.extend_from_slice(&cell.to_le_bytes());
-        addr = addr.wrapping_add(4);
-    }
-    // Fatia [skip, skip+count) do que foi lido (pode ser menor no fim do segmento).
-    let end = (skip + count).min(out.len());
-    Some(out.get(skip..end).unwrap_or(&[]).to_vec())
+    // O SDK cuida do alinhamento de cells e para no primeiro endereço
+    // inacessível — no fim do segmento devolve menos que `count`.
+    amx.read_bytes(start, count)
 }
 
 /// Arma os data breakpoints pedidos pelo adaptador. Resolve cada `(frame, name)`
@@ -389,8 +377,7 @@ fn resolve_data_watches(reqs: Vec<pawnpro_dbg_protocol::DataWatch>) -> Vec<DataW
     let Some((amx_usize, frames)) = PAUSE_CTX.lock().ok().and_then(|g| g.clone()) else {
         return Vec::new();
     };
-    // Reconstrói um `Amx` sobre a VM pausada só para ler as células iniciais.
-    let amx = Amx::new(amx_usize as *mut samp::raw::types::AMX, 0);
+    let amx = Amx::data_only(amx_usize as *mut samp::raw::types::AMX);
     let Ok(guard) = DBG.lock() else {
         return Vec::new();
     };
@@ -451,10 +438,7 @@ pub fn set_variable(frame: usize, name: &str, index: Option<usize>, value: i32) 
         let (cip, frm) = *frames.get(frame)?;
         (*amx_usize, cip, frm)
     };
-    // Reconstrói um `Amx` sobre o ponteiro da VM pausada. `write_cell` lê o
-    // base/data segment direto da struct AMX, então a tabela de funções não é
-    // necessária aqui (0 serve).
-    let amx = Amx::new(amx_usize as *mut samp::raw::types::AMX, 0);
+    let amx = Amx::data_only(amx_usize as *mut samp::raw::types::AMX);
 
     let guard = DBG.lock().ok()?;
     let dbg = guard.as_ref()?;
