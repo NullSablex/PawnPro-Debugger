@@ -40,7 +40,8 @@ primitivas de VM vêm do SDK [`rust-samp`](https://rust-samp.nullsablex.com/):
 
 Usar o SDK como fonte única evita duplicar o parser entre o plugin e o adaptador
 (o adaptador depende do `rust-samp-sdk` com `default-features = false, features =
-["debug"]`, só a lógica pura, sem FFI).
+["debug"]`, só a lógica pura, sem FFI). Ambos vêm do crates.io na versão
+**3.4.0** — o build não depende de nenhuma dependência `git`.
 
 ## Fluxo de uma pausa
 

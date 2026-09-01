@@ -41,7 +41,8 @@ VM primitives come from the [`rust-samp`](https://rust-samp.nullsablex.com/) SDK
 
 Using the SDK as the single source avoids duplicating the parser between plugin
 and adapter (the adapter depends on `rust-samp-sdk` with `default-features =
-false, features = ["debug"]` — the pure logic only, no FFI).
+false, features = ["debug"]` — the pure logic only, no FFI). Both come from
+crates.io at version **3.4.0**; the build has no `git` dependency.
 
 ## The flow of a pause
 

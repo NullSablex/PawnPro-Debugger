@@ -12,7 +12,7 @@ crate-type = ["cdylib"]
 [dependencies]
 pawnpro-dbg-protocol = { path = "../protocol" }
 interprocess = "2"
-samp = { package = "rust-samp", git = "https://github.com/NullSablex/rust-samp", rev = "9524c09", features = ["debug"] }
+samp = { package = "rust-samp", version = "3.4.0", features = ["debug"] }
 
 [package.metadata.samp]
 uid = "0x0d9107bbd31c8d1b"

@@ -11,7 +11,7 @@ name = "dap-adapter"
 path = "src/main.rs"
 
 [dependencies]
-rust-samp-sdk = { git = "https://github.com/NullSablex/rust-samp", rev = "9524c09", default-features = false, features = ["debug"] }
+rust-samp-sdk = { version = "3.4.0", default-features = false, features = ["debug"] }
 pawnpro-dbg-protocol = { path = "../protocol" }
 interprocess = "2"
 serde = { version = "1", features = ["derive"] }

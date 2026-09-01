@@ -33,7 +33,8 @@ expressão, leitura de memória e mais três classes de erro de runtime.
 - **README e documentação reescritos** — recursos, arquitetura e a página de localização atualizados para o que esta versão entrega.
 
 ### Dependências
-- **SDK `rust-samp`** atualizado ao longo do ciclo, acompanhando o que cada versão liberou: `v3.3.1` (correção), `v3.4.0`, o acessor `Amx::hlw` (exigido pelo HEAPLOW) e `AmxDbg::function_address` (exigido pelos breakpoints de função).
+- **SDK `rust-samp` agora vem do crates.io** (`3.4.0`), no lugar da dependência `git` + `rev` que o projeto carregava desde o início — ela existia porque o debugger precisava de API ainda não publicada. O build deixa de depender do GitHub para resolver dependências.
+- Ao longo do ciclo o SDK acompanhou o que cada versão liberou: `v3.3.1` (correção), `v3.4.0`, o acessor `Amx::hlw` (exigido pelo HEAPLOW) e `AmxDbg::function_address` (exigido pelos breakpoints de função).
 - **Lógica genérica de VM devolvida ao SDK** (`rust-samp-sdk` 3.4.0) — a numeração dos opcodes, o tamanho das instruções, o decodificador da relocação por computed-goto (`OpcodeMap`), a caminhada da cadeia de frames e a leitura de faixas de memória eram fatos da VM AMX que viviam aqui. Agora vêm de `samp::debug::opcode`, `samp::debug::stack` e `Amx::read_bytes`/`call_stack`/`data_only`, e o plugin ficou ~250 linhas menor sem perder comportamento.
 - Atualizações de `serde` (1.0.229), `serde_json` (1.0.151), das GitHub Actions e das dependências da documentação.
 
