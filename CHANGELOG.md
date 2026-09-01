@@ -30,11 +30,16 @@ expressão, leitura de memória e mais três classes de erro de runtime.
 ### Alterado
 - **Mensagens do adaptador agora são localizadas** — antes só os erros de runtime seguiam o idioma do editor. As mensagens dos dois lados foram unificadas em `crates/protocol/src/messages`, com 11 chaves em pt-BR, en, es, ro e ru; a tabela de cada idioma é exaustiva, então um idioma incompleto não compila.
 - **O protocolo ganhou um canal request/response** — `ReadMemory` ↔ `MemoryData`, correlacionados por `id` e com timeout, para a sessão não ficar presa se o plugin não responder. O restante do protocolo continua assíncrono nos dois sentidos.
-- **README e documentação reescritos** — recursos, arquitetura e a página de localização atualizados para o que esta versão entrega.
+- **README e documentação reescritos** — recursos, arquitetura e a página de localização atualizados para o que esta versão entrega. O README ganhou a fileira de badges (CI, CodeQL, docs, OpenSSF Scorecard, release, downloads, estrelas e licença) e uma linha de navegação para a documentação, os releases e a extensão.
+- **Marcador do plugin atualizado para `PAWNPRO_DEBUG_MARKER:0.2.0`** — a extensão casa apenas o prefixo `PAWNPRO_DEBUG_MARKER`, então o reconhecimento do plugin oficial não muda; o tamanho segue 26 bytes.
+
+### Corrigido
+- Tabela de erros em [Como funciona a pausa no erro](docs/runtime-errors.md): faltavam `OP_CALL_PRI` no STACKERR e `OP_LODB_I`/`OP_STRB_I`/`OP_LIDX_B` no MEMACCESS, todos já checados pelo plugin.
 
 ### Dependências
 - **SDK `rust-samp` agora vem do crates.io** (`3.4.0`), no lugar da dependência `git` + `rev` que o projeto carregava desde o início — ela existia porque o debugger precisava de API ainda não publicada. O build deixa de depender do GitHub para resolver dependências.
 - Ao longo do ciclo o SDK acompanhou o que cada versão liberou: `v3.3.1` (correção), `v3.4.0`, o acessor `Amx::hlw` (exigido pelo HEAPLOW) e `AmxDbg::function_address` (exigido pelos breakpoints de função).
+- Atualizações do **Dependabot** nos três ecossistemas, agrupadas por ecossistema a partir de #13: `cargo` (`serde` 1.0.228 → 1.0.229 e o grupo cargo com 2 atualizações), `github-actions` (`checkout`, `upload-artifact`, `download-artifact`, `setup-python`, `rust-cache`, `action-gh-release`) e `pip` (`mkdocs-material`, `pymdown-extensions`). Nenhuma altera comportamento do debugger.
 - **Lógica genérica de VM devolvida ao SDK** (`rust-samp-sdk` 3.4.0) — a numeração dos opcodes, o tamanho das instruções, o decodificador da relocação por computed-goto (`OpcodeMap`), a caminhada da cadeia de frames e a leitura de faixas de memória eram fatos da VM AMX que viviam aqui. Agora vêm de `samp::debug::opcode`, `samp::debug::stack` e `Amx::read_bytes`/`call_stack`/`data_only`, e o plugin ficou ~250 linhas menor sem perder comportamento.
 - Atualizações de `serde` (1.0.229), `serde_json` (1.0.151), das GitHub Actions e das dependências da documentação.
 
