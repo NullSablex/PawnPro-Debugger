@@ -39,7 +39,7 @@ static FIRST_AMX_SEEN: AtomicBool = AtomicBool::new(false);
 /// (`src/core/server.ts`). NÃO renomear o valor — é contrato com a extensão.
 #[used]
 #[unsafe(no_mangle)]
-pub static PAWNPRO_DEBUG_MARKER: [u8; 26] = *b"PAWNPRO_DEBUG_MARKER:0.1.0";
+pub static PAWNPRO_DEBUG_MARKER: [u8; 26] = *b"PAWNPRO_DEBUG_MARKER:0.2.0";
 
 /// Mantém o marcador vivo até o link final. `#[used]` sozinho não basta para um
 /// cdylib: o linker ainda pode descartar o dado por não ser referenciado nem
@@ -72,7 +72,7 @@ impl SampPlugin for Debugger {
         // Idioma das mensagens de erro, do locale do editor (propagado pelo
         // adaptador). Ausente/desconhecido → inglês.
         if let Ok(loc) = std::env::var("PAWNPRO_DBG_LOCALE") {
-            hook::set_locale(crate::runtime_error::Locale::from_str(&loc));
+            hook::set_locale(crate::runtime_error::Locale::from_tag(&loc));
         }
 
         // Carrega o bloco de debug do `.amx`, se o caminho foi informado, para a

@@ -34,7 +34,12 @@ Copie o arquivo para a pasta correta do seu servidor:
 ## 3. Depurar
 
 Abra o `.pwn` do gamemode no editor (com a extensão PawnPro) e pressione **F5**.
-Coloque breakpoints na margem e depure normalmente.
+Coloque breakpoints na margem e depure normalmente. A extensão recompila o
+gamemode com `-d3` (o bloco de debug com linhas e símbolos) antes de subir o
+servidor — sem ele não há breakpoint nem inspeção.
+
+Enquanto a execução está pausada, o servidor fica **congelado**: é esperado num
+servidor local de desenvolvimento.
 
 ### Exemplo de `launch.json`
 
@@ -46,3 +51,9 @@ Coloque breakpoints na margem e depure normalmente.
   "program": "${workspaceFolder}/gamemodes/meugm.amx"
 }
 ```
+
+## Próximo passo
+
+Veja [Recursos](features.md) para o que dá para fazer na pausa — call stack,
+inspeção e edição de variáveis, data breakpoints, hex view da memória e a pausa
+automática em [erros de runtime](runtime-errors.md).

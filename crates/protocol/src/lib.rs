@@ -12,6 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod messages;
 pub mod transport;
 
 /// Modo de step pedido pelo adaptador.
@@ -58,21 +59,61 @@ pub enum Command {
     /// código que roda uma única vez no início (ex.: `OnGameModeInit`).
     Configured,
     /// Edita uma variável em escopo na pausa atual: grava `value` na célula de
-    /// `name`. Só vale enquanto a VM está pausada.
-    SetVariable { name: String, value: i32 },
+    /// `name`. `frame` é o índice do frame da pilha (0 = topo, onde a VM parou),
+    /// para editar a variável no escopo correto. Só vale enquanto a VM está pausada.
+    SetVariable {
+        frame: usize,
+        name: String,
+        /// Índice do elemento, quando a variável é um array (`arr[index]`);
+        /// `None` edita um escalar.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        index: Option<usize>,
+        value: i32,
+    },
+    /// Substitui o conjunto de data breakpoints (pausar quando uma variável muda).
+    /// Cada alvo vem como frame + nome porque só o plugin sabe o `frm`/endereço
+    /// para resolvê-lo; enviado enquanto a VM está pausada (o editor arma o data
+    /// breakpoint a partir do painel Variáveis).
+    SetDataBreakpoints { watches: Vec<DataWatch> },
+    /// Liga/desliga a pausa em erros de runtime (filtro de exceção do editor).
+    /// `false` deixa a VM abortar normalmente, sem pausar antes.
+    SetExceptionFilter { runtime: bool },
+    /// Lê memória de dados crua: `count` bytes a partir do endereço da variável
+    /// `name` (elemento `index`, se array) no frame `frame`, mais `offset`. O
+    /// plugin responde com um [`Event::MemoryData`] correlacionado por `id`.
+    ReadMemory {
+        id: u64,
+        frame: usize,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        index: Option<usize>,
+        offset: i64,
+        count: usize,
+    },
+}
+
+/// Um data breakpoint pedido: a variável `name` em escopo no frame `frame`
+/// (0 = topo). O plugin resolve o endereço de dados e passa a observar mudanças.
+/// `index` observa um elemento de array (`name[index]`); `None` observa um escalar.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataWatch {
+    pub frame: usize,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<usize>,
 }
 
 /// Evento do plugin para o adaptador.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "camelCase")]
 pub enum Event {
-    /// A VM pausou. `line` é a linha-fonte (mapeada do `cip`, se possível) e
-    /// `vars` são os símbolos em escopo no momento — enviados junto para evitar
-    /// uma ida-e-volta de inspeção enquanto a VM está bloqueada.
+    /// A VM pausou. `frames` é a pilha de chamadas completa — do topo (frame 0,
+    /// onde a VM parou) até o público de entrada. Cada frame traz sua linha-fonte
+    /// e as variáveis em escopo naquele frame, enviadas junto para evitar
+    /// idas-e-voltas de inspeção enquanto a VM está bloqueada.
     Paused {
         reason: String,
-        line: Option<i32>,
-        vars: Vec<Var>,
+        frames: Vec<Frame>,
         /// Texto descritivo opcional (ex.: mensagem de um erro de runtime quando
         /// `reason == "exception"`). Vira o `description`/`text` do `stopped` DAP.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83,13 +124,30 @@ pub enum Event {
     Output { text: String },
     /// O script terminou / a VM foi descarregada.
     Exited,
+    /// Resposta a um [`Command::ReadMemory`]: os `bytes` lidos, correlacionados
+    /// pelo `id` do pedido. Vazio se o endereço não pôde ser resolvido/lido.
+    MemoryData { id: u64, bytes: Vec<u8> },
 }
 
-/// Um par variável→valor para a inspeção.
+/// Um par variável→valor para a inspeção. Arrays trazem os elementos em
+/// `children` (expansíveis na árvore do editor); escalares têm `children` vazio.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Var {
     pub name: String,
     pub value: String,
+    /// Elementos de um array (`[0]`, `[1]`, …); vazio para escalares.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<Var>,
+}
+
+/// Um frame da pilha de chamadas na pausa. `name` é o nome da função (resolvido
+/// do bloco de debug pelo endereço), `line` a linha-fonte do frame e `vars` as
+/// variáveis em escopo nele.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Frame {
+    pub name: String,
+    pub line: Option<i32>,
+    pub vars: Vec<Var>,
 }
 
 /// Serializa uma mensagem como uma linha JSON (com `\n` ao final).
@@ -135,6 +193,32 @@ mod tests {
             },
             Command::Continue,
             Command::Step { mode: Step::Over },
+            Command::SetVariable {
+                frame: 1,
+                name: "x".into(),
+                index: None,
+                value: 7,
+            },
+            Command::SetVariable {
+                frame: 0,
+                name: "arr".into(),
+                index: Some(2),
+                value: 9,
+            },
+            Command::SetDataBreakpoints {
+                watches: vec![
+                    DataWatch {
+                        frame: 0,
+                        name: "health".into(),
+                        index: None,
+                    },
+                    DataWatch {
+                        frame: 2,
+                        name: "placar".into(),
+                        index: Some(3),
+                    },
+                ],
+            },
         ] {
             let line = to_line(&cmd).unwrap();
             assert!(line.ends_with('\n'));
@@ -148,17 +232,31 @@ mod tests {
         for ev in [
             Event::Paused {
                 reason: "breakpoint".into(),
-                line: Some(42),
-                vars: vec![Var {
-                    name: "g".into(),
-                    value: "1".into(),
+                frames: vec![Frame {
+                    name: "main".into(),
+                    line: Some(42),
+                    vars: vec![Var {
+                        name: "g".into(),
+                        value: "1".into(),
+                        children: vec![],
+                    }],
                 }],
                 description: None,
             },
             Event::Paused {
                 reason: "exception".into(),
-                line: Some(7),
-                vars: vec![],
+                frames: vec![
+                    Frame {
+                        name: "foo".into(),
+                        line: Some(7),
+                        vars: vec![],
+                    },
+                    Frame {
+                        name: "main".into(),
+                        line: Some(20),
+                        vars: vec![],
+                    },
+                ],
                 description: Some("divisão por zero".into()),
             },
             Event::Output { text: "x=5".into() },

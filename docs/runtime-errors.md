@@ -42,19 +42,23 @@ código-fonte de nenhum dos dois, porque ambos usam a mesma VM AMX.
 
 ## Erros detectados
 
-| Erro | Opcode | Condição |
+| Erro | Opcode / checagem | Condição (fiel ao `amx.c`) |
 |------|--------|----------|
 | Divisão por zero | `OP_SDIV` / `OP_UDIV` | divisor (`alt`) é zero |
 | Divisão por zero | `OP_SDIV_ALT` / `OP_UDIV_ALT` | divisor (`pri`) é zero |
 | Índice fora do limite | `OP_BOUNDS` | `(unsigned) pri > limite` |
+| Colisão pilha/heap (`STACKERR`) | `OP_STACK` / `OP_HEAP` / `OP_PROC` / `OP_CALL` / `OP_CALL_PRI` (`CHKMARGIN`) | `hea + STKMARGIN > stk` (no `CALL`, antecipa o `PROC` do chamado) |
+| Underflow de heap (`HEAPLOW`) | `OP_HEAP` (`CHKHEAP`) | `hea < hlw` |
+| Acesso inválido à memória (`MEMACCESS`) | `OP_LOAD_I` / `OP_LODB_I` / `OP_STOR_I` / `OP_STRB_I` / `OP_LIDX` / `OP_LIDX_B` (`VERIFYADDRESS`) | endereço em `[hea, stk)` ou `>= stp` |
 
 Ao detectar, o debugger pausa com `reason: "exception"` e a mensagem no idioma do
 editor, mostrando a linha e as variáveis — como um breakpoint normal.
 
-!!! note "Cobertura parcial por design"
-    Só erros previsíveis por análise da próxima instrução. `STACKERR`,
-    `MEMACCESS` e `HEAPLOW` dependem de estado dinâmico e estão em avaliação — não
-    é "pausa em qualquer exceção".
+!!! note "Conservador por design"
+    As checagens de `STACKERR`/`HEAPLOW`/`MEMACCESS` rastreiam `stk`/`hea` ao longo
+    da linha e só disparam enquanto esse rastreio é exato; qualquer desvio ou
+    opcode não modelado (salto, `sysreq`, aritmética) as desliga — **nunca** um
+    falso-positivo. Não é "pausa em qualquer exceção".
 
 ## Primitivas do SDK usadas
 

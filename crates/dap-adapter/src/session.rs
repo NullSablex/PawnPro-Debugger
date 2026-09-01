@@ -5,9 +5,11 @@
 //! mapear linha ↔ endereço. A conexão com o plugin do servidor (Componente 2)
 //! ainda não existe; por ora os breakpoints são só resolvidos a endereço.
 
-use pawnpro_dbg_protocol::{Breakpoint, Command, Step};
+use pawnpro_dbg_protocol::{Breakpoint, Command, DataWatch, Step};
 use samp_sdk::debug::AmxDbg;
 use serde_json::{Value, json};
+
+use pawnpro_dbg_protocol::messages::{self, Locale, MsgKey};
 
 use crate::messages::{Event, Request, Response};
 
@@ -23,6 +25,18 @@ pub enum Outgoing {
     ConnectPlugin(String),
     /// Encaminhar um comando ao plugin (breakpoints/continue/step).
     ToPlugin(Command),
+    /// Ler memória crua do plugin (bloqueia esperando a resposta) e responder o
+    /// `readMemory` do editor. Resolvido no `main` (o `session` é puro). `seq` é a
+    /// resposta já numerada; `address` é o texto que volta no campo `address`.
+    ReadMemory {
+        seq: i64,
+        address: String,
+        frame: usize,
+        name: String,
+        index: Option<usize>,
+        offset: i64,
+        count: usize,
+    },
 }
 
 /// Comando do servidor a executar, mais as variáveis de depuração que o plugin lê.
@@ -51,12 +65,18 @@ pub struct Session {
     seq: i64,
     /// Bloco de debug do `.amx` em depuração (carregado no `launch`).
     dbg: Option<AmxDbg>,
-    /// Breakpoints resolvidos: (linha-fonte, endereço de código).
+    /// Breakpoints de linha resolvidos: (linha-fonte, endereço de código).
     breakpoints: Vec<(i32, u32)>,
+    /// Breakpoints de linha resolvidos (forma completa, com modificadores).
+    line_bps: Vec<Breakpoint>,
+    /// Breakpoints de função resolvidos (parar ao entrar na função por nome).
+    fn_bps: Vec<Breakpoint>,
     /// Caminho do arquivo-fonte (o `source.path` que o editor enviou em
     /// `setBreakpoints`). Usado no `stackTrace` para o frame apontar à fonte —
     /// senão o editor mostra "Origem Desconhecida".
     source_path: Option<String>,
+    /// Idioma das mensagens do adaptador, do `locale` do `initialize`.
+    locale: Locale,
     terminated: bool,
 }
 
@@ -98,6 +118,7 @@ impl Session {
             "initialize" => self.on_initialize(req),
             "launch" => self.on_launch(req),
             "setBreakpoints" => self.on_set_breakpoints(req),
+            "setFunctionBreakpoints" => self.on_set_function_breakpoints(req),
             "threads" => self.on_threads(req),
             "continue" => self.on_continue(req),
             "next" => self.on_step(req, Step::Over),
@@ -107,6 +128,12 @@ impl Session {
             "scopes" => self.on_scopes(req),
             "variables" => self.on_variables(req),
             "setVariable" => self.on_set_variable(req),
+            "setExpression" => self.on_set_expression(req),
+            "dataBreakpointInfo" => self.on_data_breakpoint_info(req),
+            "setDataBreakpoints" => self.on_set_data_breakpoints(req),
+            "setExceptionBreakpoints" => self.on_set_exception_breakpoints(req),
+            "completions" => self.on_completions(req),
+            "readMemory" => self.on_read_memory(req),
             "evaluate" => self.on_evaluate(req),
             "disconnect" | "terminate" => self.on_disconnect(req),
             "restart" => self.on_restart(req),
@@ -122,22 +149,33 @@ impl Session {
     }
 
     fn on_initialize(&mut self, req: &Request) -> Vec<Outgoing> {
-        // Capabilities mínimas da v1.
+        // O cliente informa o idioma no `initialize`; guardamos para localizar as
+        // mensagens do adaptador (o plugin recebe o seu próprio via `launch`).
+        self.locale = req
+            .arguments
+            .get("locale")
+            .and_then(Value::as_str)
+            .map_or_else(Locale::default, Locale::from_tag);
+        let runtime_label = messages::msg(self.locale, MsgKey::RuntimeErrorsLabel);
+        // Capabilities mínimas da v1. `supportsEvaluateForHovers` reaproveita o
+        // `evaluate` do painel INSPEÇÃO ao passar o mouse no código.
         let caps = json!({
             "supportsConfigurationDoneRequest": true,
             "supportsTerminateRequest": true,
-            // Habilita avaliar variável ao passar o mouse no código (hover) — usa
-            // o mesmo `evaluate` do painel INSPEÇÃO (watch).
             "supportsEvaluateForHovers": true,
-            // Breakpoint condicional: o plugin avalia `var OP valor` e só pausa
-            // se verdadeiro.
             "supportsConditionalBreakpoints": true,
-            // Breakpoint por contagem de acertos (`5`, `>=3`, `%2`).
             "supportsHitConditionalBreakpoints": true,
-            // Logpoint: breakpoint que loga `msg com {var}` sem pausar.
             "supportsLogPoints": true,
-            // Editar variável no painel Variáveis durante a pausa.
             "supportsSetVariable": true,
+            "supportsSetExpression": true,
+            "supportsDataBreakpoints": true,
+            "supportsFunctionBreakpoints": true,
+            "supportsCompletionsRequest": true,
+            "supportsReadMemoryRequest": true,
+            // Filtro de exceção: o editor liga/desliga a pausa em erros de runtime.
+            "exceptionBreakpointFilters": [
+                { "filter": "runtime", "label": runtime_label, "default": true }
+            ],
             // NÃO declaramos `supportsRestartRequest`: assim o editor faz o
             // restart como disconnect + novo launch, que passa pelo nosso fluxo
             // (derruba o servidor antigo, espera a porta, sobe um novo) — o único
@@ -279,7 +317,7 @@ impl Session {
 
         self.breakpoints.clear();
         let mut verified = Vec::new();
-        let mut breakpoints = Vec::new();
+        let mut line_bps = Vec::new();
         for ReqBp {
             line,
             condition,
@@ -293,7 +331,7 @@ impl Session {
                 .and_then(|d| d.line_to_address(line, file));
             if let Some(a) = addr {
                 self.breakpoints.push((line, a));
-                breakpoints.push(Breakpoint {
+                line_bps.push(Breakpoint {
                     addr: a,
                     condition,
                     hit_condition,
@@ -310,6 +348,56 @@ impl Session {
             verified.push(json!({ "verified": addr.is_some(), "line": actual_line }));
         }
 
+        // Substitui os breakpoints de LINHA e envia a união (linha + função) — o
+        // plugin mantém um único conjunto.
+        self.line_bps = line_bps;
+        let breakpoints = self.all_breakpoints();
+        let body = json!({ "breakpoints": verified });
+        self.reply_with(req, Command::SetBreakpoints { breakpoints }, body)
+    }
+
+    /// União dos breakpoints de linha e de função — o plugin mantém um conjunto só.
+    fn all_breakpoints(&self) -> Vec<Breakpoint> {
+        self.line_bps
+            .iter()
+            .chain(self.fn_bps.iter())
+            .cloned()
+            .collect()
+    }
+
+    /// `setFunctionBreakpoints`: substitui os breakpoints de FUNÇÃO. Cada `name` é
+    /// resolvido no endereço de entrada da função (via `AmxDbg::function_address`)
+    /// e entra na união enviada ao plugin. Responde verificado por breakpoint.
+    fn on_set_function_breakpoints(&mut self, req: &Request) -> Vec<Outgoing> {
+        let names: Vec<String> = req
+            .arguments
+            .get("breakpoints")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|b| b.get("name").and_then(Value::as_str).map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut fn_bps = Vec::new();
+        let mut verified = Vec::new();
+        for name in names {
+            let addr = self.dbg.as_ref().and_then(|d| d.function_address(&name));
+            if let Some(a) = addr {
+                fn_bps.push(Breakpoint {
+                    addr: a,
+                    condition: None,
+                    hit_condition: None,
+                    log_message: None,
+                });
+            }
+            let line = addr.and_then(|a| self.dbg.as_ref().and_then(|d| d.lookup_line(a)));
+            verified.push(json!({ "verified": addr.is_some(), "line": line }));
+        }
+
+        self.fn_bps = fn_bps;
+        let breakpoints = self.all_breakpoints();
         let body = json!({ "breakpoints": verified });
         self.reply_with(req, Command::SetBreakpoints { breakpoints }, body)
     }
@@ -335,45 +423,120 @@ impl Session {
         self.reply_with(req, Command::Step { mode }, Value::Null)
     }
 
-    /// `stackTrace`: um único frame na linha onde a VM parou (v1 sem call stack
-    /// completo — o plugin ainda não caminha os frames). O frame inclui `source`
-    /// apontando ao arquivo-fonte; sem isso o editor mostra "Origem Desconhecida"
-    /// e não destaca a linha de execução.
+    /// `stackTrace`: a pilha de chamadas completa da última pausa (frame 0 = topo).
+    /// Cada frame carrega o nome da função, a linha-fonte e um `source` apontando ao
+    /// arquivo — sem isso o editor mostra "Origem Desconhecida" e não destaca a
+    /// linha. O `id` (1-based) identifica o frame nos `scopes`/`variables`/`evaluate`
+    /// seguintes. Antes da primeira pausa (sem frames), devolve um frame-âncora só
+    /// para o editor ter a fonte.
     fn on_stack_trace(&mut self, req: &Request) -> Vec<Outgoing> {
-        let line = crate::plugin_client::last_line().unwrap_or(0);
-        let mut frame = json!({
-            "id": 1,
-            "name": "main",
-            "line": line,
-            "column": 0,
-        });
-        if let Some(path) = self.source_path.as_deref() {
-            frame["source"] = json!({
+        let source = self.source_path.as_deref().map(|path| {
+            json!({
                 "name": std::path::Path::new(path)
                     .file_name()
                     .and_then(|s| s.to_str())
                     .unwrap_or(path),
                 "path": path,
-            });
-        }
-        let body = json!({ "stackFrames": [frame], "totalFrames": 1 });
+            })
+        });
+
+        let frames = crate::plugin_client::last_frames();
+        let stack_frames: Vec<Value> = if frames.is_empty() {
+            // Sem pausa ainda: frame-âncora para ancorar a fonte no editor.
+            vec![with_source(
+                json!({ "id": 1, "name": "main", "line": 0, "column": 0 }),
+                source.as_ref(),
+            )]
+        } else {
+            frames
+                .iter()
+                .enumerate()
+                .map(|(i, f)| {
+                    with_source(
+                        json!({
+                            "id": i + 1,
+                            "name": f.name,
+                            "line": f.line.unwrap_or(0),
+                            "column": 0,
+                        }),
+                        source.as_ref(),
+                    )
+                })
+                .collect()
+        };
+        let total = stack_frames.len();
+        let body = json!({ "stackFrames": stack_frames, "totalFrames": total });
         self.reply(req, body)
     }
 
-    /// `scopes`: um escopo "Locais" com `variablesReference` fixo (1).
+    /// `scopes`: um escopo "Locais" por frame. O `frameId` (vindo do `stackTrace`)
+    /// vira o `variablesReference` do escopo, para o `variables` seguinte saber de
+    /// qual frame ler.
     fn on_scopes(&mut self, req: &Request) -> Vec<Outgoing> {
+        let frame_id = req
+            .arguments
+            .get("frameId")
+            .and_then(Value::as_i64)
+            .unwrap_or(1);
         let body = json!({
-            "scopes": [ { "name": "Locais", "variablesReference": 1, "expensive": false } ]
+            "scopes": [ { "name": "Locais", "variablesReference": frame_id, "expensive": false } ]
         });
         self.reply(req, body)
     }
 
-    /// `variables`: devolve as variáveis da última pausa (recebidas no `Paused`).
+    /// `variables`: variáveis do container referenciado. Se o `variablesReference`
+    /// é de um array (codificado), devolve os elementos; senão é um escopo de frame
+    /// (`ref - 1`) e devolve as variáveis de topo — arrays ganham um ref próprio
+    /// (não-zero) para o editor poder expandi-los.
     fn on_variables(&mut self, req: &Request) -> Vec<Outgoing> {
-        let vars: Vec<Value> = crate::plugin_client::last_vars()
-            .into_iter()
-            .map(|v| json!({ "name": v.name, "value": v.value, "variablesReference": 0 }))
-            .collect();
+        let reference = req
+            .arguments
+            .get("variablesReference")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+
+        let vars: Vec<Value> = if let Some((frame, var_index)) = decode_array_ref(reference) {
+            // Elementos de um array (folhas). `memoryReference` = frame:arr:index.
+            crate::plugin_client::frame_vars(frame)
+                .get(var_index)
+                .map(|arr| {
+                    arr.children
+                        .iter()
+                        .map(|c| {
+                            let mem = parse_elem_index(&c.name)
+                                .map(|i| format!("{frame}:{}:{i}", arr.name));
+                            json!({
+                                "name": c.name,
+                                "value": c.value,
+                                "variablesReference": 0,
+                                "memoryReference": mem,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            // Escopo do frame: variáveis de topo; arrays viram expansíveis. Cada
+            // uma expõe `memoryReference` (frame:name) para o `readMemory`.
+            let frame = frame_index(req.arguments.get("variablesReference"));
+            crate::plugin_client::frame_vars(frame)
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    let child_ref = if v.children.is_empty() {
+                        0
+                    } else {
+                        encode_array_ref(frame, i)
+                    };
+                    json!({
+                        "name": v.name,
+                        "value": v.value,
+                        "variablesReference": child_ref,
+                        "memoryReference": format!("{frame}:{}", v.name),
+                    })
+                })
+                .collect()
+        };
         let body = json!({ "variables": vars });
         self.reply(req, body)
     }
@@ -395,51 +558,290 @@ impl Session {
             .unwrap_or("")
             .trim()
             .to_string();
+        let reference = req
+            .arguments
+            .get("variablesReference")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
 
         // Aceita inteiro (decimal/hex), float (`50.0`) e bool (`true`/`false`). O
         // valor enviado ao plugin é sempre uma célula i32 (float = bits IEEE-754,
         // bool = 0/1); `shown` é o texto amigável que volta para o painel.
         let seq = self.next_seq();
         let Some((value, shown)) = parse_set_value(&raw) else {
-            return vec![Outgoing::Response(Response::fail(
-                seq,
-                req,
-                format!(
-                    "valor inválido: '{raw}' (use inteiro, ex.: 100/0x64; float, ex.: 1.5; ou true/false)"
-                ),
-            ))];
+            let detail = messages::format(self.locale, MsgKey::InvalidValue, &[&raw]);
+            return vec![Outgoing::Response(Response::fail(seq, req, detail))];
         };
 
-        // Arrays não são editáveis (o plugin os rejeita). Detectamos pelo valor
-        // atual em cache começar com `[` e falhamos AQUI, em vez de responder um
-        // sucesso falso e desencontrar o painel do estado real da VM.
-        let is_array = crate::plugin_client::last_vars()
+        // Edição de ELEMENTO de array: o `variablesReference` é o do array e o
+        // `name` é `[i]`. Resolve o nome do array e o índice, e edita a célula.
+        if let Some((frame, var_index)) = decode_array_ref(reference) {
+            let vars = crate::plugin_client::frame_vars(frame);
+            let (Some(arr), Some(i)) = (vars.get(var_index), parse_elem_index(&name)) else {
+                let detail = messages::format(self.locale, MsgKey::InvalidElement, &[&name]);
+                return vec![Outgoing::Response(Response::fail(seq, req, detail))];
+            };
+            let array_name = arr.name.clone();
+            crate::plugin_client::update_array_elem(frame, var_index, i, &shown);
+            let body = json!({ "value": shown, "variablesReference": 0 });
+            return vec![
+                Outgoing::ToPlugin(Command::SetVariable {
+                    frame,
+                    name: array_name,
+                    index: Some(i),
+                    value,
+                }),
+                Outgoing::Response(Response::ok(seq, req, body)),
+            ];
+        }
+
+        // Escalar: o `variablesReference` é o escopo do frame (== frameId 1-based).
+        let frame = frame_index(req.arguments.get("variablesReference"));
+        // O array inteiro não é editável — o editor deve editar um elemento (que
+        // vem com seu próprio ref). Falha amigável se pedirem o container.
+        let is_array = crate::plugin_client::frame_vars(frame)
             .iter()
-            .any(|v| v.name == name && v.value.trim_start().starts_with('['));
+            .any(|v| v.name == name && !v.children.is_empty());
         if is_array {
-            return vec![Outgoing::Response(Response::fail(
-                seq,
-                req,
-                format!("'{name}' é um array; editar arrays ainda não é suportado"),
-            ))];
+            let detail = messages::format(self.locale, MsgKey::ArrayEditElement, &[&name, &name]);
+            return vec![Outgoing::Response(Response::fail(seq, req, detail))];
         }
 
         // Resposta otimista: a edição quase sempre vale (variável simples em
         // escopo). O plugin efetiva a escrita; atualizamos o cache local para o
         // painel/watch refletirem o novo valor sem reler a VM.
-        crate::plugin_client::update_var(&name, &shown);
+        crate::plugin_client::update_var(frame, &name, &shown);
         let body = json!({ "value": shown, "variablesReference": 0 });
         vec![
-            Outgoing::ToPlugin(Command::SetVariable { name, value }),
+            Outgoing::ToPlugin(Command::SetVariable {
+                frame,
+                name,
+                index: None,
+                value,
+            }),
             Outgoing::Response(Response::ok(seq, req, body)),
         ]
     }
 
-    /// `evaluate`: usado pelo painel INSPEÇÃO (watch) e pelo hover. Avalia uma
-    /// expressão simples — por ora, o NOME de uma variável em escopo — buscando
-    /// nas variáveis da última pausa. Expressões compostas ainda não são
-    /// suportadas; nesses casos respondemos com erro amigável (DAP exige falha no
-    /// `evaluate` para o editor mostrar "não disponível" em vez de um valor falso).
+    /// `setExpression`: edita um lvalue (`name` ou `arr[i]`) no watch/console. O
+    /// índice pode ser subexpressão. Encaminha ao plugin como `SetVariable`.
+    fn on_set_expression(&mut self, req: &Request) -> Vec<Outgoing> {
+        let expr = req
+            .arguments
+            .get("expression")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let raw = req
+            .arguments
+            .get("value")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let frame = req
+            .arguments
+            .get("frameId")
+            .and_then(Value::as_i64)
+            .and_then(|id| usize::try_from(id - 1).ok())
+            .unwrap_or(0);
+
+        let seq = self.next_seq();
+        let Some((value, shown)) = parse_set_value(&raw) else {
+            let detail = messages::format(self.locale, MsgKey::InvalidValue, &[&raw]);
+            return vec![Outgoing::Response(Response::fail(seq, req, detail))];
+        };
+        let vars = crate::plugin_client::frame_vars(frame);
+        let Some((name, index)) = parse_lvalue(&expr, &vars) else {
+            let detail = messages::format(self.locale, MsgKey::CannotEvaluate, &[&expr]);
+            return vec![Outgoing::Response(Response::fail(seq, req, detail))];
+        };
+
+        // Cache otimista (o painel reflete sem reler a VM).
+        if let Some(i) = index {
+            if let Some(vi) = vars.iter().position(|v| v.name == name) {
+                crate::plugin_client::update_array_elem(frame, vi, i, &shown);
+            }
+        } else {
+            crate::plugin_client::update_var(frame, &name, &shown);
+        }
+
+        let body = json!({ "value": shown, "variablesReference": 0 });
+        vec![
+            Outgoing::ToPlugin(Command::SetVariable {
+                frame,
+                name,
+                index,
+                value,
+            }),
+            Outgoing::Response(Response::ok(seq, req, body)),
+        ]
+    }
+
+    /// `dataBreakpointInfo`: o editor pergunta se dá para observar mudanças na
+    /// variável `name` do escopo (`variablesReference` = frame). Respondemos um
+    /// `dataId` opaco (`"frame:name"`) que o `setDataBreakpoints` seguinte reusa;
+    /// `dataId: null` recusa (variável fora do cache do frame). Não persiste entre
+    /// sessões (locais dependem do frame) e observamos escrita (mudança de valor).
+    fn on_data_breakpoint_info(&mut self, req: &Request) -> Vec<Outgoing> {
+        let reference = req
+            .arguments
+            .get("variablesReference")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let name = req
+            .arguments
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+
+        // Resolve `(dataId, descrição)`: escalar (`variablesReference` = escopo do
+        // frame) ou ELEMENTO de array (`variablesReference` = ref do array, `name`
+        // = `[i]`). `dataId` codifica `frame:name[:index]`; `null` = não observável.
+        let resolved = if let Some((frame, var_index)) = decode_array_ref(reference) {
+            let vars = crate::plugin_client::frame_vars(frame);
+            match (vars.get(var_index), parse_elem_index(&name)) {
+                (Some(arr), Some(i)) => Some((
+                    format!("{frame}:{}:{i}", arr.name),
+                    format!("{}[{i}]", arr.name),
+                )),
+                _ => None,
+            }
+        } else {
+            let frame = frame_index(req.arguments.get("variablesReference"));
+            // Escalar em escopo (arrays têm filhos e não são observáveis inteiros).
+            crate::plugin_client::frame_vars(frame)
+                .iter()
+                .any(|v| v.name == name && v.children.is_empty())
+                .then(|| (format!("{frame}:{name}"), name.clone()))
+        };
+
+        let body = if let Some((data_id, description)) = resolved {
+            json!({
+                "dataId": data_id,
+                "description": description,
+                "accessTypes": ["write"],
+                "canPersist": false,
+            })
+        } else {
+            json!({ "dataId": Value::Null, "description": name })
+        };
+        self.reply(req, body)
+    }
+
+    /// `setDataBreakpoints`: substitui o conjunto de data breakpoints. Decodifica
+    /// cada `dataId` (`"frame:name"`) de volta em frame + nome e encaminha ao
+    /// plugin, que resolve o endereço e passa a observar. Responde verificado.
+    fn on_set_data_breakpoints(&mut self, req: &Request) -> Vec<Outgoing> {
+        let watches: Vec<DataWatch> = req
+            .arguments
+            .get("breakpoints")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|b| parse_data_id(b.get("dataId")?.as_str()?))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let verified: Vec<Value> = watches
+            .iter()
+            .map(|_| json!({ "verified": true }))
+            .collect();
+        let body = json!({ "breakpoints": verified });
+        self.reply_with(req, Command::SetDataBreakpoints { watches }, body)
+    }
+
+    /// `setExceptionBreakpoints`: o editor envia os filtros ativos. Ligamos a
+    /// pausa em erros de runtime se o filtro `runtime` estiver na lista; senão a
+    /// desligamos (a VM aborta normalmente).
+    fn on_set_exception_breakpoints(&mut self, req: &Request) -> Vec<Outgoing> {
+        let runtime = req
+            .arguments
+            .get("filters")
+            .and_then(Value::as_array)
+            .is_some_and(|fs| fs.iter().any(|f| f.as_str() == Some("runtime")));
+        self.reply_with(req, Command::SetExceptionFilter { runtime }, Value::Null)
+    }
+
+    /// `readMemory`: lê memória de dados crua a partir do `memoryReference` de uma
+    /// variável (`frame:name` ou `frame:name:index`, montado em `variables`). A
+    /// leitura em si (bloqueante, no plugin) é feita pelo `main` via
+    /// [`Outgoing::ReadMemory`].
+    fn on_read_memory(&mut self, req: &Request) -> Vec<Outgoing> {
+        let mem_ref = req
+            .arguments
+            .get("memoryReference")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let offset = req
+            .arguments
+            .get("offset")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let count = req
+            .arguments
+            .get("count")
+            .and_then(Value::as_i64)
+            .and_then(|c| usize::try_from(c).ok())
+            .unwrap_or(0);
+
+        let seq = self.next_seq();
+        let Some(DataWatch { frame, name, index }) = parse_data_id(&mem_ref) else {
+            return vec![Outgoing::Response(Response::fail(
+                seq,
+                req,
+                format!("memoryReference inválido: '{mem_ref}'"),
+            ))];
+        };
+        vec![Outgoing::ReadMemory {
+            seq,
+            address: mem_ref,
+            frame,
+            name,
+            index,
+            offset,
+            count,
+        }]
+    }
+
+    /// `completions`: autocomplete no watch/console. Sugere as variáveis em escopo
+    /// no frame cujos nomes começam com o "pedaço" já digitado (o identificador
+    /// antes do cursor). Sem prefixo, sugere todas.
+    fn on_completions(&mut self, req: &Request) -> Vec<Outgoing> {
+        let frame = req
+            .arguments
+            .get("frameId")
+            .and_then(Value::as_i64)
+            .and_then(|id| usize::try_from(id - 1).ok())
+            .unwrap_or(0);
+        let text = req
+            .arguments
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let column = req
+            .arguments
+            .get("column")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let prefix = word_prefix(text, column);
+
+        let targets: Vec<Value> = crate::plugin_client::frame_vars(frame)
+            .into_iter()
+            .filter(|v| prefix.is_empty() || v.name.starts_with(&prefix))
+            .map(|v| json!({ "label": v.name, "type": "variable" }))
+            .collect();
+        self.reply(req, json!({ "targets": targets }))
+    }
+
+    /// `evaluate`: painel INSPEÇÃO (watch) e hover. Avalia a expressão com o
+    /// [`crate::expr`] contra as variáveis do frame: nome, literal, `arr[i]`, ou
+    /// `A OP B` (aritmética/comparação). O que não avaliar vira falha explícita
+    /// (o DAP exige falha para o editor mostrar "não disponível", não um valor falso).
     fn on_evaluate(&mut self, req: &Request) -> Vec<Outgoing> {
         let expr = req
             .arguments
@@ -447,22 +849,24 @@ impl Session {
             .and_then(Value::as_str)
             .unwrap_or("")
             .trim();
-
-        // Busca exata pelo nome da variável entre as da última pausa.
-        let found = crate::plugin_client::last_vars()
-            .into_iter()
-            .find(|v| v.name == expr);
+        // O `frameId` (1-based, do `stackTrace`) escolhe o escopo; ausente (ex.:
+        // console global) cai no frame do topo.
+        let frame = req
+            .arguments
+            .get("frameId")
+            .and_then(Value::as_i64)
+            .and_then(|id| usize::try_from(id - 1).ok())
+            .unwrap_or(0);
 
         let seq = self.next_seq();
-        if let Some(v) = found {
-            let body = json!({ "result": v.value, "variablesReference": 0 });
+        if let Some(result) = crate::expr::eval(expr, &crate::plugin_client::frame_vars(frame)) {
+            let body = json!({ "result": result, "variablesReference": 0 });
             vec![Outgoing::Response(Response::ok(seq, req, body))]
         } else {
-            // Sem a variável em escopo (ou expressão composta): falha explícita.
             let detail = if expr.is_empty() {
-                "expressão vazia".to_string()
+                messages::format(self.locale, MsgKey::EmptyExpression, &[])
             } else {
-                format!("'{expr}' não está em escopo")
+                messages::format(self.locale, MsgKey::CannotEvaluate, &[expr])
             };
             vec![Outgoing::Response(Response::fail(seq, req, detail))]
         }
@@ -511,6 +915,98 @@ impl Session {
     pub fn set_debug(&mut self, dbg: AmxDbg) {
         self.dbg = Some(dbg);
     }
+}
+
+/// Índice do frame (0-based) a partir de um `variablesReference`/`frameId`
+/// (1-based, como o `stackTrace`/`scopes` definem). Ausente ou inválido → topo (0).
+fn frame_index(reference: Option<&Value>) -> usize {
+    reference
+        .and_then(Value::as_i64)
+        .and_then(|r| usize::try_from(r - 1).ok())
+        .unwrap_or(0)
+}
+
+/// Base dos `variablesReference` de array — bem acima de qualquer id de frame
+/// (escopos de frame são 1..N). Codifica `(frame, índice-da-var)` para o editor
+/// expandir os elementos de um array e editá-los.
+const ARRAY_REF_BASE: i64 = 1_000_000;
+/// Máximo de variáveis por frame no esquema de codificação.
+const ARRAY_REF_STRIDE: i64 = 10_000;
+
+/// Codifica `(frame, var_index)` num `variablesReference` de array. Índices são
+/// pequenos; `try_from` protege contra estouro (retorna 0 no impossível).
+fn encode_array_ref(frame: usize, var_index: usize) -> i64 {
+    let frame = i64::try_from(frame).unwrap_or(0);
+    let var_index = i64::try_from(var_index).unwrap_or(0);
+    ARRAY_REF_BASE + frame * ARRAY_REF_STRIDE + var_index
+}
+
+/// Decodifica um `variablesReference` em `(frame, var_index)` se for de array;
+/// `None` para refs de escopo de frame (1..N).
+fn decode_array_ref(reference: i64) -> Option<(usize, usize)> {
+    let r = reference.checked_sub(ARRAY_REF_BASE).filter(|r| *r >= 0)?;
+    Some((
+        usize::try_from(r / ARRAY_REF_STRIDE).ok()?,
+        usize::try_from(r % ARRAY_REF_STRIDE).ok()?,
+    ))
+}
+
+/// Índice de um elemento a partir do nome do filho `"[i]"` (como montado na
+/// inspeção). `None` se não casar o formato.
+fn parse_elem_index(name: &str) -> Option<usize> {
+    name.strip_prefix('[')?.strip_suffix(']')?.parse().ok()
+}
+
+/// Interpreta um lvalue (`name` ou `name[expr]`) para `setExpression`. O índice
+/// pode ser literal ou subexpressão (resolvida por [`crate::expr`] contra as
+/// variáveis do frame). `None` se não for um lvalue simples.
+fn parse_lvalue(expr: &str, vars: &[pawnpro_dbg_protocol::Var]) -> Option<(String, Option<usize>)> {
+    let expr = expr.trim();
+    if let Some(open) = expr.find('[')
+        && let Some(stripped) = expr.strip_suffix(']')
+    {
+        let name = expr[..open].trim().to_string();
+        let idx = crate::expr::eval(&stripped[open + 1..], vars)?
+            .parse::<usize>()
+            .ok()?;
+        return (!name.is_empty()).then_some((name, Some(idx)));
+    }
+    (!expr.is_empty() && expr.chars().all(|c| c.is_alphanumeric() || c == '_'))
+        .then(|| (expr.to_string(), None))
+}
+
+/// Identificador sendo digitado antes do cursor (`column`, 1-based em `text`) —
+/// a corrida final de `[A-Za-z0-9_]`. Usado para filtrar o autocomplete.
+fn word_prefix(text: &str, column: i64) -> String {
+    let n = usize::try_from(column).unwrap_or(0).saturating_sub(1);
+    let typed: String = text.chars().take(n).collect();
+    let mut tail: Vec<char> = typed
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    tail.reverse();
+    tail.into_iter().collect()
+}
+
+/// Decodifica um `dataId` (`"frame:name"` ou `"frame:name:index"`, montado no
+/// `dataBreakpointInfo`) de volta em um [`DataWatch`]. Nomes Pawn são
+/// identificadores (sem `:`), então os campos são posicionais.
+fn parse_data_id(data_id: &str) -> Option<DataWatch> {
+    let mut parts = data_id.splitn(3, ':');
+    let frame = parts.next()?.parse().ok()?;
+    let name = parts.next()?.to_string();
+    let index = parts.next().and_then(|s| s.parse().ok());
+    Some(DataWatch { frame, name, index })
+}
+
+/// Anexa `source` (se houver) a um frame do `stackTrace`, para o editor ancorar a
+/// linha ao arquivo-fonte.
+fn with_source(mut frame: Value, source: Option<&Value>) -> Value {
+    if let Some(src) = source {
+        frame["source"] = src.clone();
+    }
+    frame
 }
 
 /// Interpreta o texto digitado em `setVariable` e devolve `(célula, texto)`:
@@ -731,6 +1227,218 @@ mod tests {
     }
 
     #[test]
+    fn scopes_reference_follows_frame_id() {
+        // O escopo "Locais" referencia o frame pedido (frameId), para o
+        // `variables` seguinte ler daquele frame — e não de um id fixo.
+        let mut s = Session::new();
+        let out = s.handle(&req("scopes", &json!({ "frameId": 3 })));
+        let scope = &first_response(&out).body["scopes"][0];
+        assert_eq!(scope["variablesReference"], 3);
+    }
+
+    #[test]
+    fn frame_index_maps_1based_reference_to_0based() {
+        // variablesReference/frameId são 1-based (id do stackTrace); o índice do
+        // frame é `ref - 1`. Ausente ou inválido cai no topo (0).
+        assert_eq!(frame_index(Some(&json!(1))), 0);
+        assert_eq!(frame_index(Some(&json!(3))), 2);
+        assert_eq!(frame_index(None), 0);
+        assert_eq!(frame_index(Some(&json!(0))), 0); // inválido → topo
+    }
+
+    #[test]
+    fn array_ref_encode_decode_roundtrip() {
+        // Refs de array ficam acima de qualquer id de frame e decodificam de volta.
+        let r = encode_array_ref(2, 5);
+        assert!(r >= ARRAY_REF_BASE);
+        assert_eq!(decode_array_ref(r), Some((2, 5)));
+        assert_eq!(decode_array_ref(encode_array_ref(0, 0)), Some((0, 0)));
+        // Refs de escopo de frame (1..N) não são de array.
+        assert_eq!(decode_array_ref(1), None);
+        assert_eq!(decode_array_ref(9), None);
+    }
+
+    #[test]
+    fn read_memory_parses_reference() {
+        let mut s = Session::new();
+        let out = s.handle(&req(
+            "readMemory",
+            &json!({ "memoryReference": "0:health", "offset": 2, "count": 8 }),
+        ));
+        assert!(out.iter().any(|o| matches!(o,
+            Outgoing::ReadMemory { frame: 0, name, index: None, offset: 2, count: 8, .. }
+            if name == "health")));
+        // Referência inválida → resposta de falha.
+        let out = s.handle(&req(
+            "readMemory",
+            &json!({ "memoryReference": "lixo", "offset": 0, "count": 4 }),
+        ));
+        assert!(!first_response(&out).success);
+    }
+
+    #[test]
+    fn parse_lvalue_scalar_and_element() {
+        let no_vars: Vec<pawnpro_dbg_protocol::Var> = vec![];
+        assert_eq!(parse_lvalue("x", &no_vars), Some(("x".into(), None)));
+        assert_eq!(
+            parse_lvalue("arr[2]", &no_vars),
+            Some(("arr".into(), Some(2)))
+        );
+        // Não é lvalue simples.
+        assert_eq!(parse_lvalue("x + 1", &no_vars), None);
+        assert_eq!(parse_lvalue("arr[", &no_vars), None);
+        assert_eq!(parse_lvalue("", &no_vars), None);
+    }
+
+    #[test]
+    fn set_expression_forwards_element_edit() {
+        let mut s = Session::new();
+        let out = s.handle(&req(
+            "setExpression",
+            &json!({ "expression": "arr[2]", "value": "9", "frameId": 1 }),
+        ));
+        assert!(has_command(
+            &out,
+            |c| matches!(c, Command::SetVariable { name, index, value, .. }
+            if name == "arr" && *index == Some(2) && *value == 9)
+        ));
+        assert_eq!(first_response(&out).body["value"], "9");
+    }
+
+    #[test]
+    fn word_prefix_extracts_trailing_identifier() {
+        assert_eq!(word_prefix("hea", 4), "hea"); // cursor no fim
+        assert_eq!(word_prefix("x + he", 7), "he"); // após operador
+        assert_eq!(word_prefix("arr[i", 6), "i"); // dentro de colchete
+        assert_eq!(word_prefix("x + ", 5), ""); // depois de espaço → vazio
+        assert_eq!(word_prefix("health", 4), "hea"); // cursor no meio
+    }
+
+    #[test]
+    fn parse_elem_index_reads_bracketed() {
+        assert_eq!(parse_elem_index("[0]"), Some(0));
+        assert_eq!(parse_elem_index("[42]"), Some(42));
+        assert_eq!(parse_elem_index("x"), None);
+        assert_eq!(parse_elem_index("[a]"), None);
+    }
+
+    #[test]
+    fn parse_data_id_splits_frame_name_index() {
+        assert_eq!(
+            parse_data_id("0:health"),
+            Some(DataWatch {
+                frame: 0,
+                name: "health".into(),
+                index: None,
+            })
+        );
+        // Elemento de array: frame:name:index.
+        assert_eq!(
+            parse_data_id("2:arr:3"),
+            Some(DataWatch {
+                frame: 2,
+                name: "arr".into(),
+                index: Some(3),
+            })
+        );
+        // Sem separador ou frame não-numérico → None.
+        assert_eq!(parse_data_id("semdoispontos"), None);
+        assert_eq!(parse_data_id("x:health"), None);
+    }
+
+    #[test]
+    fn set_data_breakpoints_forwards_watches() {
+        let mut s = Session::new();
+        let args = json!({
+            "breakpoints": [ { "dataId": "1:health" }, { "dataId": "0:g_placar" } ]
+        });
+        let out = s.handle(&req("setDataBreakpoints", &args));
+        // Encaminha os dois watches decodificados ao plugin.
+        assert!(has_command(
+            &out,
+            |c| matches!(c, Command::SetDataBreakpoints { watches }
+            if watches.len() == 2
+                && watches[0] == DataWatch { frame: 1, name: "health".into(), index: None }
+                && watches[1] == DataWatch { frame: 0, name: "g_placar".into(), index: None })
+        ));
+        // E responde os dois como verificados.
+        let bps = first_response(&out).body["breakpoints"].as_array().unwrap();
+        assert_eq!(bps.len(), 2);
+        assert_eq!(bps[0]["verified"], true);
+    }
+
+    #[test]
+    fn set_exception_breakpoints_toggles_runtime() {
+        let mut s = Session::new();
+        // Filtro presente → liga.
+        let out = s.handle(&req(
+            "setExceptionBreakpoints",
+            &json!({ "filters": ["runtime"] }),
+        ));
+        assert!(has_command(&out, |c| matches!(
+            c,
+            Command::SetExceptionFilter { runtime: true }
+        )));
+        // Lista vazia → desliga.
+        let out = s.handle(&req("setExceptionBreakpoints", &json!({ "filters": [] })));
+        assert!(has_command(&out, |c| matches!(
+            c,
+            Command::SetExceptionFilter { runtime: false }
+        )));
+    }
+
+    #[test]
+    fn function_breakpoints_resolve_and_union_with_line() {
+        let mut s = Session::new();
+        s.set_debug(sample_dbg_fn());
+        // 1 breakpoint de linha (linha 4 → addr 20).
+        s.handle(&req(
+            "setBreakpoints",
+            &json!({ "source": { "path": "a.pwn" }, "breakpoints": [ { "line": 4 } ] }),
+        ));
+        // Breakpoint de função "foo" (entrada em addr 8) + "naoexiste" (não resolve).
+        let out = s.handle(&req(
+            "setFunctionBreakpoints",
+            &json!({ "breakpoints": [ { "name": "foo" }, { "name": "naoexiste" } ] }),
+        ));
+        // Verificação: foo ok, naoexiste não.
+        let bps = first_response(&out).body["breakpoints"].as_array().unwrap();
+        assert_eq!(bps[0]["verified"], true);
+        assert_eq!(bps[1]["verified"], false);
+        // A união enviada ao plugin tem o bp de linha (20) e o de função (8).
+        assert!(has_command(
+            &out,
+            |c| matches!(c, Command::SetBreakpoints { breakpoints }
+            if breakpoints.iter().any(|b| b.addr == 20) && breakpoints.iter().any(|b| b.addr == 8))
+        ));
+    }
+
+    #[test]
+    fn initialize_advertises_function_breakpoints() {
+        let mut s = Session::new();
+        let out = s.handle(&req("initialize", &Value::Null));
+        assert_eq!(
+            first_response(&out).body["supportsFunctionBreakpoints"],
+            true
+        );
+    }
+
+    #[test]
+    fn initialize_advertises_exception_filter() {
+        let mut s = Session::new();
+        let out = s.handle(&req("initialize", &Value::Null));
+        let filters = &first_response(&out).body["exceptionBreakpointFilters"];
+        assert_eq!(filters[0]["filter"], "runtime");
+    }
+
+    #[test]
+    fn initialize_advertises_data_breakpoints() {
+        let mut s = Session::new();
+        let out = s.handle(&req("initialize", &Value::Null));
+        assert_eq!(first_response(&out).body["supportsDataBreakpoints"], true);
+    }
+
+    #[test]
     fn disconnect_terminates() {
         let mut s = Session::new();
         let out = s.handle(&req("disconnect", &Value::Null));
@@ -740,15 +1448,35 @@ mod tests {
 
     /// Bloco de debug mínimo (mesma forma do teste do amxdbg): a.pwn linha 3 → 20.
     fn sample_dbg() -> AmxDbg {
+        dbg_bytes(0, |_| {})
+    }
+
+    /// Como `sample_dbg`, mas com uma função `foo` no range `[8, 40)` — para testar
+    /// `setFunctionBreakpoints` (o endereço de entrada cai na 1ª linha, addr 8).
+    fn sample_dbg_fn() -> AmxDbg {
+        dbg_bytes(1, |t| {
+            ext_u32(t, 0); // address
+            ext_i16(t, 0); // tag
+            ext_u32(t, 8); // codestart
+            ext_u32(t, 40); // codeend
+            t.push(9); // ident = Function
+            t.push(0); // vclass = global
+            ext_i16(t, 0); // dim
+            ext_cstr(t, "foo"); // name
+        })
+    }
+
+    /// Monta um `AmxDbg` com 1 arquivo, 2 linhas ((8,2),(20,3)) e `nsyms` símbolos
+    /// (escritos por `push_syms`).
+    fn dbg_bytes(nsyms: i16, push_syms: impl Fn(&mut Vec<u8>)) -> AmxDbg {
         let mut t = Vec::new();
-        // files: 1 (a.pwn @ 0)
         ext_u32(&mut t, 0);
         ext_cstr(&mut t, "a.pwn");
-        // lines: 2 — (8,2), (20,3)
         ext_u32(&mut t, 8);
         ext_i32(&mut t, 2);
         ext_u32(&mut t, 20);
         ext_i32(&mut t, 3);
+        push_syms(&mut t);
         let mut b = Vec::new();
         ext_i32(&mut b, i32::try_from(22 + t.len()).unwrap());
         b.extend_from_slice(&samp_sdk::debug::AMX_DBG_MAGIC.to_le_bytes());
@@ -757,7 +1485,7 @@ mod tests {
         ext_i16(&mut b, 0); // flags
         ext_i16(&mut b, 1); // files
         ext_i16(&mut b, 2); // lines
-        ext_i16(&mut b, 0); // symbols
+        ext_i16(&mut b, nsyms); // symbols
         ext_i16(&mut b, 0); // tags
         ext_i16(&mut b, 0); // automatons
         ext_i16(&mut b, 0); // states

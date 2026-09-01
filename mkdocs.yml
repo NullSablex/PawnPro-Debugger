@@ -48,6 +48,36 @@ theme:
     edit: material/pencil
     view: material/eye
 
+# `search` fica listado explicitamente: declarar `plugins` substitui o padrão do
+# MkDocs, que traz a busca embutida.
+plugins:
+  - search
+  - i18n:
+      docs_structure: suffix
+      fallback_to_default: true
+      languages:
+        - locale: pt-BR
+          name: Português (BR)
+          default: true
+          build: true
+        - locale: en-US
+          name: English (US)
+          build: true
+          site_description: Visual debugger (DAP) for Pawn (SA-MP / open.mp)
+          # O tema fica em `en`: o Material traduz a interface por idioma e não
+          # tem uma tabela para `en-US` (só `en`), o que quebraria o build.
+          theme:
+            language: en
+          nav_translations:
+            Início: Home
+            Uso: Usage
+            Começando: Getting started
+            Recursos: Features
+            Interno: Internals
+            Arquitetura: Architecture
+            Como funciona a pausa no erro: How pausing on an error works
+            Localização (i18n): Localization (i18n)
+
 markdown_extensions:
   - admonition
   - attr_list
@@ -82,6 +112,7 @@ nav:
   - Interno:
       - Arquitetura: architecture.md
       - Como funciona a pausa no erro: runtime-errors.md
+      - Localização (i18n): i18n.md
 
 extra:
   social:

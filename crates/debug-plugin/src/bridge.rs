@@ -170,11 +170,27 @@ fn apply(cmd: Command) {
             BRIDGE.gate.resume(Resume::Step(m));
         }
         Command::Configured => BRIDGE.mark_configured(),
-        Command::SetVariable { name, value } => {
-            // Aplica na pausa atual. O adaptador responde ao editor de forma
-            // otimista; aqui só efetivamos a escrita na VM (no-op se não houver
-            // pausa ou a variável não for editável).
-            let _ = crate::hook::set_variable(&name, value);
+        Command::SetVariable {
+            frame,
+            name,
+            index,
+            value,
+        } => {
+            // Aplica na pausa atual, no frame selecionado. `index` edita um elemento
+            // de array; `None`, um escalar. O adaptador responde ao editor de forma
+            // otimista; aqui só efetivamos a escrita na VM (no-op se não houver pausa
+            // ou a variável não for editável).
+            let _ = crate::hook::set_variable(frame, &name, index, value);
         }
+        Command::SetDataBreakpoints { watches } => crate::hook::set_data_breakpoints(watches),
+        Command::SetExceptionFilter { runtime } => crate::hook::set_runtime_errors(runtime),
+        Command::ReadMemory {
+            id,
+            frame,
+            name,
+            index,
+            offset,
+            count,
+        } => crate::hook::read_memory(id, frame, &name, index, offset, count),
     }
 }
