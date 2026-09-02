@@ -177,8 +177,8 @@ impl Session {
             .and_then(Value::as_str)
             .map_or_else(Locale::default, Locale::from_tag);
         let runtime_label = messages::msg(self.locale, MsgKey::RuntimeErrorsLabel);
-        // Capabilities mínimas da v1. `supportsEvaluateForHovers` reaproveita o
-        // `evaluate` do painel INSPEÇÃO ao passar o mouse no código.
+        // `supportsEvaluateForHovers` reaproveita o `evaluate` do painel
+        // INSPEÇÃO ao passar o mouse no código.
         let caps = json!({
             "supportsConfigurationDoneRequest": true,
             "supportsTerminateRequest": true,
@@ -200,10 +200,6 @@ impl Session {
             "exceptionBreakpointFilters": [
                 { "filter": "runtime", "label": runtime_label, "default": true }
             ],
-            // NÃO declaramos `supportsRestartRequest`: assim o editor faz o
-            // restart como disconnect + novo launch, que passa pelo nosso fluxo
-            // (derruba o servidor antigo, espera a porta, sobe um novo) — o único
-            // jeito de o código de carga rodar de novo.
         });
         let seq = self.next_seq();
         let resp = Response::ok(seq, req, caps);
@@ -1008,8 +1004,25 @@ impl Session {
         // que os produzia acabou de morrer, e os painéis precisam limpar.
         // Os `breakpoint` avisam onde cada marcador ficou depois da recompilação
         // — a linha pode ter andado, ou o breakpoint deixado de ser válido.
+        let sessao = spec.session.clone();
         let mut saida = vec![
             Outgoing::SpawnServer(spec),
+            // O canal antigo morreu com o processo, e o `PluginClient` só tem
+            // retry na conexão inicial — reusá-lo mandaria comandos para um
+            // socket morto. Reconectar aqui é o que dá um canal vivo ao plugin
+            // do servidor novo.
+            Outgoing::ConnectPlugin(sessao),
+            // E o plugin novo sobe sem breakpoint nenhum: o estado morreu junto
+            // com o processo anterior. Reresolver os endereços e avisar o editor
+            // não basta — sem isto a VM roda sem saber onde parar, e a execução
+            // passa direto pelo breakpoint.
+            Outgoing::ToPlugin(Command::SetBreakpoints {
+                breakpoints: self.all_breakpoints(),
+            }),
+            // O plugin bloqueia a VM na carga esperando este sinal (com timeout
+            // de 10 s). Sem ele o servidor novo ficaria parado até o timeout, e
+            // breakpoints em `OnGameModeInit` e afins se perderiam.
+            Outgoing::ToPlugin(Command::Configured),
             Outgoing::Response(Response::ok(seq, req, Value::Null)),
             Outgoing::Event(Event::new(
                 ev_seq,
@@ -1323,6 +1336,27 @@ mod tests {
                 .iter()
                 .any(|o| matches!(o, Outgoing::Event(e) if e.event == "breakpoint")),
             "o editor precisa saber onde cada marcador ficou"
+        );
+        // Reresolver e avisar o editor não basta: o servidor novo traz um plugin
+        // novo, sem breakpoint nenhum, e num canal novo. Sem reconectar e
+        // reenviar, a VM roda sem saber onde parar e a execução passa direto.
+        assert!(
+            saida
+                .iter()
+                .any(|o| matches!(o, Outgoing::ConnectPlugin(id) if id == "s1")),
+            "o canal antigo morreu com o processo: o restart precisa reconectar"
+        );
+        assert!(
+            has_command(
+                &saida,
+                |c| matches!(c, Command::SetBreakpoints { breakpoints }
+                if breakpoints.len() == 1 && breakpoints[0].addr == 20)
+            ),
+            "e reenviar os breakpoints ao plugin do servidor novo"
+        );
+        assert!(
+            has_command(&saida, |c| matches!(c, Command::Configured)),
+            "e liberar a VM, que fica bloqueada na carga esperando o sinal"
         );
     }
 
