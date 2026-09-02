@@ -42,35 +42,24 @@ fn main() -> io::Result<()> {
         for outgoing in session.handle(&req) {
             match outgoing {
                 Outgoing::Response(_) | Outgoing::Event(_) => emit(&out, &outgoing),
-                Outgoing::SpawnServer(spec) => match spawn_server(&spec, &out) {
-                    Ok(child) => server = Some(child),
-                    Err(e) => out.event(
-                        "output",
-                        serde_json::json!({
-                            "category": "stderr",
-                            "output": format!("Falha ao iniciar o servidor: {e}\n"),
-                        }),
-                    ),
-                },
-                Outgoing::RespawnServer(spec) => {
-                    // Derruba o servidor atual: o `Drop` do `ServerChild` mata o
-                    // processo e espera. Só então sobe o próximo — o socket do
-                    // plugin precisa ser liberado antes de o novo abri-lo, e o
-                    // `listen_with_retry` do plugin cobre a folga que sobrar.
+                // Subir e reiniciar são o mesmo ato: derrubar o que houver e
+                // pôr um servidor no lugar. No `launch` não há o que derrubar;
+                // no `restart` há, e o `Drop` do `ServerChild` cuida disso ao
+                // atribuir `None`. Reconectar depois é inofensivo no primeiro
+                // caso — o `launch` emite `ConnectPlugin` logo em seguida — e
+                // necessário no segundo, porque o canal morreu com o processo.
+                Outgoing::SpawnServer(spec) => {
                     server = None;
                     match spawn_server(&spec, &out) {
                         Ok(child) => {
                             server = Some(child);
-                            // O canal antigo morreu com o processo. Reconectar
-                            // pelo mesmo id: o `PluginClient` já traz retry, e o
-                            // plugin reabre o socket ao carregar.
                             plugin = Some(PluginClient::connect(&spec.session, out.clone()));
                         }
                         Err(e) => out.event(
                             "output",
                             serde_json::json!({
                                 "category": "stderr",
-                                "output": format!("Falha ao reiniciar o servidor: {e}\n"),
+                                "output": format!("Falha ao iniciar o servidor: {e}\n"),
                             }),
                         ),
                     }

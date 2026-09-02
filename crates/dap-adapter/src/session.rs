@@ -18,13 +18,12 @@ use crate::messages::{Event, Request, Response};
 pub enum Outgoing {
     Response(Response),
     Event(Event),
-    /// Subir o servidor do jogo como processo FILHO do adaptador. Morre junto com
-    /// o adaptador (encerrar/reiniciar), sem o editor rastrear nada.
+    /// Pôr um servidor no lugar do que houver, como processo FILHO do
+    /// adaptador. Serve tanto ao `launch` (não há o que derrubar) quanto ao
+    /// `restart` (derruba o atual e sobe outro com a mesma `session`, mantendo
+    /// a sessão de depuração viva). O filho morre junto com o adaptador, sem o
+    /// editor rastrear nada.
     SpawnServer(SpawnSpec),
-    /// Derrubar o servidor atual e subir outro com a **mesma** `session`,
-    /// mantendo a sessão de depuração viva. O plugin reabre o socket nomeado e
-    /// o `plugin_client` reconecta pelo retry que já existe.
-    RespawnServer(SpawnSpec),
     /// Conectar no plugin pelo id de sessão do socket local (pedido no `launch`).
     ConnectPlugin(String),
     /// Encaminhar um comando ao plugin (breakpoints/continue/step).
@@ -279,9 +278,12 @@ impl Session {
         }
 
         let seq = self.next_seq();
-        // O adaptador conecta no plugin com retry (o servidor leva um tempo para
-        // subir e abrir o socket), então a ordem spawn → connect não exige espera.
-        out.push(Outgoing::ConnectPlugin(session_id));
+        // Com servidor próprio, quem sobe já conecta (o handler do `SpawnServer`
+        // faz as duas coisas, e a conexão traz retry porque o servidor leva um
+        // tempo para abrir o socket). Sem ele — attach — este é o único caminho.
+        if self.spawn_spec.is_none() {
+            out.push(Outgoing::ConnectPlugin(session_id));
+        }
         out.push(Outgoing::Response(Response::ok(seq, req, Value::Null)));
         out
     }
@@ -943,7 +945,7 @@ impl Session {
         // `continued` avisa o editor de que não há mais frame parado: o processo
         // que os produzia acabou de morrer, e os painéis precisam limpar.
         vec![
-            Outgoing::RespawnServer(spec),
+            Outgoing::SpawnServer(spec),
             Outgoing::Response(Response::ok(seq, req, Value::Null)),
             Outgoing::Event(Event::new(
                 ev_seq,
@@ -953,16 +955,15 @@ impl Session {
         ]
     }
 
-    /// Breakpoints resolvidos a endereço (para o plugin, no futuro).
-    #[allow(dead_code)] // consumido pelo Componente 2 (envio ao plugin)
+    /// Breakpoints de linha resolvidos a endereço de código.
+    #[cfg(test)]
     #[must_use]
     pub fn resolved_breakpoints(&self) -> &[(i32, u32)] {
         &self.breakpoints
     }
 
-    /// Injeta um bloco de debug diretamente (usado em testes e quando a extração
-    /// do `.amx` é feita por fora).
-    #[allow(dead_code)] // usado em testes e pela integração futura
+    /// Injeta um bloco de debug diretamente, sem passar pelo `.amx`.
+    #[cfg(test)]
     pub fn set_debug(&mut self, dbg: AmxDbg) {
         self.dbg = Some(dbg);
     }
@@ -1139,9 +1140,7 @@ mod tests {
 
         let saida = ses.handle(&req("restart", &json!({})));
         assert!(
-            saida
-                .iter()
-                .any(|o| matches!(o, Outgoing::RespawnServer(_))),
+            saida.iter().any(|o| matches!(o, Outgoing::SpawnServer(_))),
             "o restart deve trocar o servidor"
         );
         assert!(
@@ -1162,9 +1161,7 @@ mod tests {
 
         let saida = ses.handle(&req("restart", &json!({})));
         assert!(
-            !saida
-                .iter()
-                .any(|o| matches!(o, Outgoing::RespawnServer(_))),
+            !saida.iter().any(|o| matches!(o, Outgoing::SpawnServer(_))),
             "sem spawn_spec não há o que reiniciar"
         );
         assert!(
