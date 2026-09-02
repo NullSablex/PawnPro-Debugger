@@ -461,8 +461,22 @@ impl Session {
     /// `configurationDone`: o cliente terminou de enviar a configuração inicial
     /// (breakpoints). Sinaliza `Configured` ao plugin, que então libera a VM
     /// segura na carga — assim breakpoints em `OnGameModeInit` e afins são pegos.
+    /// `configurationDone`: o editor terminou de configurar a sessão.
+    ///
+    /// Reenvia os breakpoints antes de liberar a VM. O editor manda
+    /// `setBreakpoints` **antes** do `launch`, quando ainda não há canal com o
+    /// plugin — e comando sem canal é descartado. Este é o ponto do protocolo
+    /// em que tudo já foi configurado e o servidor já está subindo, então é aqui
+    /// que o conjunto real de breakpoints tem de chegar ao plugin.
     fn on_configuration_done(&mut self, req: &Request) -> Vec<Outgoing> {
-        self.reply_with(req, Command::Configured, Value::Null)
+        let seq = self.next_seq();
+        vec![
+            Outgoing::ToPlugin(Command::SetBreakpoints {
+                breakpoints: self.all_breakpoints(),
+            }),
+            Outgoing::ToPlugin(Command::Configured),
+            Outgoing::Response(Response::ok(seq, req, Value::Null)),
+        ]
     }
 
     /// `continue`: retoma a VM (manda `Continue` ao plugin).
@@ -1214,6 +1228,62 @@ mod tests {
             "o restart NÃO deve encerrar a sessão"
         );
         assert!(!ses.terminated, "a sessão segue viva depois do restart");
+    }
+
+    /// Sequência real do editor: `setBreakpoints` chega ANTES do `launch`
+    /// (o editor manda os breakpoints já na configuração da sessão). Se o
+    /// pedido não sobreviver ao launch, nenhum breakpoint funciona.
+    #[test]
+    fn breakpoints_pedidos_antes_do_launch_sobrevivem() {
+        let mut ses = Session::new();
+        ses.set_debug(sample_dbg());
+        ses.handle(&req(
+            "setBreakpoints",
+            &json!({ "source": { "path": "a.pwn" }, "breakpoints": [ { "line": 4 } ] }),
+        ));
+        assert_eq!(
+            ses.resolved_breakpoints(),
+            &[(4, 20)],
+            "resolveu antes do launch"
+        );
+
+        // O launch chega depois e recarrega o bloco de debug do `.amx`.
+        ses.handle(&req(
+            "launch",
+            &json!({ "program": "/tmp/inexistente.amx", "session": "s1" }),
+        ));
+        assert_eq!(
+            ses.resolved_breakpoints(),
+            &[(4, 20)],
+            "o launch não pode descartar os breakpoints já resolvidos"
+        );
+    }
+
+    /// O editor manda `setBreakpoints` antes do `launch`, quando ainda não há
+    /// canal com o plugin — e comando sem canal é descartado. O
+    /// `configurationDone` precisa reenviar, senão nenhum breakpoint funciona.
+    #[test]
+    fn configuration_done_reenvia_os_breakpoints() {
+        let mut ses = Session::new();
+        ses.set_debug(sample_dbg());
+        ses.handle(&req(
+            "setBreakpoints",
+            &json!({ "source": { "path": "a.pwn" }, "breakpoints": [ { "line": 4 } ] }),
+        ));
+
+        let saida = ses.handle(&req("configurationDone", &json!({})));
+        assert!(
+            has_command(
+                &saida,
+                |c| matches!(c, Command::SetBreakpoints { breakpoints }
+                if breakpoints.len() == 1 && breakpoints[0].addr == 20)
+            ),
+            "o configurationDone deve reenviar o conjunto real ao plugin"
+        );
+        assert!(
+            has_command(&saida, |c| matches!(c, Command::Configured)),
+            "e liberar a VM depois"
+        );
     }
 
     /// Recompilar o gamemode muda o mapa linha↔endereço. O restart tem de

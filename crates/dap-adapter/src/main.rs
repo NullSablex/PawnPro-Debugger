@@ -53,7 +53,14 @@ fn main() -> io::Result<()> {
                     match spawn_server(&spec, &out) {
                         Ok(child) => {
                             server = Some(child);
-                            plugin = Some(PluginClient::connect(&spec.session, out.clone()));
+                            // Só conecta se ainda não há cliente. Trocar o
+                            // `PluginClient` jogaria fora a fila de comandos que
+                            // ele acumulou — e o editor manda `setBreakpoints`
+                            // ANTES do `launch`, então é justamente ali que os
+                            // breakpoints estão esperando.
+                            if plugin.is_none() {
+                                plugin = Some(PluginClient::connect(&spec.session, out.clone()));
+                            }
                         }
                         Err(e) => out.event(
                             "output",
