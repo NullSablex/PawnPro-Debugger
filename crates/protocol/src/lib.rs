@@ -122,6 +122,15 @@ pub enum Event {
     /// Saída de um **logpoint**: a mensagem já interpolada. A VM NÃO pausa; o
     /// adaptador encaminha como um evento `output` do DAP (canal do console).
     Output { text: String },
+    /// Primeira mensagem do plugin ao aceitar a conexão: quem ele é.
+    ///
+    /// Sem isto, plugin e adaptador de versões diferentes conversavam até a
+    /// primeira mensagem que um dos lados não entendia — e o sintoma era a
+    /// depuração não fazer nada, sem erro em lugar nenhum.
+    ///
+    /// Um adaptador antigo ignora este evento (evento desconhecido não derruba
+    /// a conexão), então anunciar não quebra quem já está instalado.
+    Hello { version: String },
     /// O script terminou / a VM foi descarregada.
     Exited,
     /// Resposta a um [`Command::ReadMemory`]: os `bytes` lidos, correlacionados

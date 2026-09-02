@@ -13,6 +13,9 @@ pub fn get(key: MsgKey) -> &'static str {
         MsgKey::HeapLow => "heap underflow",
         MsgKey::MemAccess => "invalid memory access",
         MsgKey::RuntimeErrorsLabel => "Runtime errors",
+        MsgKey::PluginVersaoDiferente => {
+            "Debug plugin {} with adapter {}. Update the server plugin to {}."
+        }
         MsgKey::InvalidValue => {
             "invalid value: '{}' (use an integer, e.g. 100/0x64; a float, e.g. 1.5; or true/false)"
         }

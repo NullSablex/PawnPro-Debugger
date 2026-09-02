@@ -12,6 +12,9 @@ pub fn get(key: MsgKey) -> &'static str {
         MsgKey::HeapLow => "subdepășire de heap",
         MsgKey::MemAccess => "acces nevalid la memorie",
         MsgKey::RuntimeErrorsLabel => "Erori de runtime",
+        MsgKey::PluginVersaoDiferente => {
+            "Plugin de depanare {} cu adaptor {}. Actualizează pluginul serverului la {}."
+        }
         MsgKey::InvalidValue => {
             "valoare invalidă: '{}' (folosiți un întreg, ex.: 100/0x64; un float, ex.: 1.5; sau true/false)"
         }

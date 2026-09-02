@@ -50,6 +50,8 @@ pub enum MsgKey {
     MemAccess,
     // --- Mensagens do adaptador (respostas ao editor) ---
     RuntimeErrorsLabel,
+    /// Plugin do servidor e adaptador em versões diferentes.
+    PluginVersaoDiferente,
     InvalidValue,
     InvalidElement,
     ArrayEditElement,

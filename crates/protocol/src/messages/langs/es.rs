@@ -13,6 +13,9 @@ pub fn get(key: MsgKey) -> &'static str {
         MsgKey::HeapLow => "subdesbordamiento del montículo",
         MsgKey::MemAccess => "acceso inválido a memoria",
         MsgKey::RuntimeErrorsLabel => "Errores de runtime",
+        MsgKey::PluginVersaoDiferente => {
+            "Plugin de depuración {} con adaptador {}. Actualiza el plugin del servidor a {}."
+        }
         MsgKey::InvalidValue => {
             "valor inválido: '{}' (use un entero, ej.: 100/0x64; un float, ej.: 1.5; o true/false)"
         }
