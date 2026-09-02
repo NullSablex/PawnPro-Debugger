@@ -42,7 +42,6 @@ impl Response {
         }
     }
 
-    #[allow(dead_code)] // usado quando os handlers passarem a falhar explicitamente
     pub fn fail(seq: i64, req: &Request, message: impl Into<String>) -> Self {
         Self {
             seq,

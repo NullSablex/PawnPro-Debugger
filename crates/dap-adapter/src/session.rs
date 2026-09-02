@@ -57,6 +57,7 @@ pub struct SpawnSpec {
 
 /// Um breakpoint como pedido pelo editor (DAP), antes de resolver a linha em
 /// endereço. Campos opcionais espelham os modificadores do DAP.
+#[derive(Clone)]
 struct ReqBp {
     line: i32,
     condition: Option<String>,
@@ -82,6 +83,14 @@ pub struct Session {
     /// Idioma das mensagens do adaptador, do `locale` do `initialize`.
     locale: Locale,
     terminated: bool,
+    /// Breakpoints como o editor os pediu — linha e modificadores, antes de
+    /// virarem endereço.
+    ///
+    /// O endereço depende do `.amx`: recompilar o gamemode muda o mapa
+    /// linha↔endereço, e os endereços resolvidos antes passam a apontar para
+    /// instruções erradas. Guardar o pedido original é o que permite resolver
+    /// tudo de novo depois de um restart.
+    requested_bps: Vec<(String, Vec<ReqBp>)>,
     /// Como o servidor foi iniciado, guardado do `launch`.
     ///
     /// É o que permite reiniciá-lo **sem encerrar a sessão**: o canal
@@ -288,6 +297,62 @@ impl Session {
         out
     }
 
+    /// Resolve todos os breakpoints de linha pedidos contra o bloco de debug
+    /// atual, substituindo os endereços anteriores.
+    ///
+    /// Roda no `setBreakpoints` e de novo no `restart`: o endereço depende do
+    /// `.amx`, e recompilar o gamemode muda o mapa linha↔endereço. Sem
+    /// reresolver, os endereços antigos apontariam para instruções erradas —
+    /// a VM pararia no lugar errado, ou em lugar nenhum.
+    ///
+    /// Devolve o `verified` de cada breakpoint, na ordem em que foram pedidos.
+    fn resolver_bps_de_linha(&mut self) -> Vec<Value> {
+        self.breakpoints.clear();
+        let mut verified = Vec::new();
+        let mut line_bps = Vec::new();
+
+        for (arquivo, pedidos) in self.requested_bps.clone() {
+            let file = if arquivo.is_empty() {
+                None
+            } else {
+                Some(arquivo.as_str())
+            };
+            for ReqBp {
+                line,
+                condition,
+                hit_condition,
+                log_message,
+            } in pedidos
+            {
+                let addr = self
+                    .dbg
+                    .as_ref()
+                    .and_then(|d| d.line_to_address(line, file));
+                if let Some(a) = addr {
+                    self.breakpoints.push((line, a));
+                    line_bps.push(Breakpoint {
+                        addr: a,
+                        condition,
+                        hit_condition,
+                        log_message,
+                    });
+                }
+                // Um breakpoint é "verificado" quando casou um endereço real. A
+                // linha pedida pode não ser "quebrável" — o endereço desliza para
+                // a próxima linha executável. Devolvemos a linha REAL (via
+                // `lookup_line`) para o editor reposicionar o marcador onde a VM
+                // vai de fato parar.
+                let actual_line = addr
+                    .and_then(|a| self.dbg.as_ref().and_then(|d| d.lookup_line(a)))
+                    .unwrap_or(line);
+                verified.push(json!({ "verified": addr.is_some(), "line": actual_line }));
+            }
+        }
+
+        self.line_bps = line_bps;
+        verified
+    }
+
     fn on_set_breakpoints(&mut self, req: &Request) -> Vec<Outgoing> {
         let file = req
             .arguments
@@ -335,42 +400,13 @@ impl Session {
             })
             .unwrap_or_default();
 
-        self.breakpoints.clear();
-        let mut verified = Vec::new();
-        let mut line_bps = Vec::new();
-        for ReqBp {
-            line,
-            condition,
-            hit_condition,
-            log_message,
-        } in requested
-        {
-            let addr = self
-                .dbg
-                .as_ref()
-                .and_then(|d| d.line_to_address(line, file));
-            if let Some(a) = addr {
-                self.breakpoints.push((line, a));
-                line_bps.push(Breakpoint {
-                    addr: a,
-                    condition,
-                    hit_condition,
-                    log_message,
-                });
-            }
-            // Um breakpoint é "verificado" quando casou um endereço real. A linha
-            // pedida pode não ser "quebrável" — o endereço desliza para a próxima
-            // linha executável. Devolvemos a linha REAL (via `lookup_line` do
-            // endereço) para o editor reposicionar o marcador onde a VM vai parar.
-            let actual_line = addr
-                .and_then(|a| self.dbg.as_ref().and_then(|d| d.lookup_line(a)))
-                .unwrap_or(line);
-            verified.push(json!({ "verified": addr.is_some(), "line": actual_line }));
-        }
+        // Guarda o pedido como veio: é o que permite resolver tudo de novo se o
+        // `.amx` mudar (recompilação + restart).
+        let chave = file.unwrap_or_default().to_string();
+        self.requested_bps.retain(|(f, _)| f != &chave);
+        self.requested_bps.push((chave, requested.clone()));
 
-        // Substitui os breakpoints de LINHA e envia a união (linha + função) — o
-        // plugin mantém um único conjunto.
-        self.line_bps = line_bps;
+        let verified = self.resolver_bps_de_linha();
         let breakpoints = self.all_breakpoints();
         let body = json!({ "breakpoints": verified });
         self.reply_with(req, Command::SetBreakpoints { breakpoints }, body)
@@ -940,11 +976,25 @@ impl Session {
             ];
         };
 
+        // O `.amx` pode ter sido recompilado entre a sessão e o restart — é o
+        // motivo mais comum para reiniciar. O mapa linha↔endereço muda junto,
+        // então recarregar o bloco de debug e reresolver os breakpoints é o que
+        // impede a VM de parar no lugar errado.
+        if let Ok(bytes) = std::fs::read(&spec.amx_path)
+            && let Ok(dbg) = AmxDbg::from_amx(&bytes).or_else(|_| AmxDbg::parse(&bytes))
+        {
+            self.dbg = Some(dbg);
+        }
+        let verified = self.resolver_bps_de_linha();
+
         let seq = self.next_seq();
         let ev_seq = self.next_seq();
+        let bp_seq = self.next_seq();
         // `continued` avisa o editor de que não há mais frame parado: o processo
         // que os produzia acabou de morrer, e os painéis precisam limpar.
-        vec![
+        // Os `breakpoint` avisam onde cada marcador ficou depois da recompilação
+        // — a linha pode ter andado, ou o breakpoint deixado de ser válido.
+        let mut saida = vec![
             Outgoing::SpawnServer(spec),
             Outgoing::Response(Response::ok(seq, req, Value::Null)),
             Outgoing::Event(Event::new(
@@ -952,7 +1002,21 @@ impl Session {
                 "continued",
                 json!({ "threadId": 1, "allThreadsContinued": true }),
             )),
-        ]
+        ];
+
+        // Um `breakpoint` por marcador, com a linha onde ele de fato ficou.
+        for (i, v) in verified.iter().enumerate() {
+            let mut corpo = v.clone();
+            if let Some(obj) = corpo.as_object_mut() {
+                obj.insert("id".into(), json!(i + 1));
+            }
+            saida.push(Outgoing::Event(Event::new(
+                bp_seq + i64::try_from(i).unwrap_or(0),
+                "breakpoint",
+                json!({ "reason": "changed", "breakpoint": corpo }),
+            )));
+        }
+        saida
     }
 
     /// Breakpoints de linha resolvidos a endereço de código.
@@ -1150,6 +1214,46 @@ mod tests {
             "o restart NÃO deve encerrar a sessão"
         );
         assert!(!ses.terminated, "a sessão segue viva depois do restart");
+    }
+
+    /// Recompilar o gamemode muda o mapa linha↔endereço. O restart tem de
+    /// reresolver os breakpoints contra o `.amx` novo — senão os endereços
+    /// antigos apontariam para instruções erradas.
+    #[test]
+    fn restart_reresolve_os_breakpoints() {
+        let mut ses = Session::new();
+        ses.handle(&req(
+            "launch",
+            &json!({
+                "program": "/tmp/gm.amx",
+                "session": "s1",
+                "serverCommand": { "exe": "/tmp/omp-server", "args": [], "cwd": "/tmp" }
+            }),
+        ));
+        ses.set_debug(sample_dbg());
+        ses.handle(&req(
+            "setBreakpoints",
+            &json!({ "source": { "path": "a.pwn" }, "breakpoints": [ { "line": 4 } ] }),
+        ));
+        assert_eq!(
+            ses.resolved_breakpoints(),
+            &[(4, 20)],
+            "o setBreakpoints resolve contra o mapa atual"
+        );
+
+        // O restart limpa e resolve de novo, a partir do pedido guardado.
+        let saida = ses.handle(&req("restart", &json!({})));
+        assert_eq!(
+            ses.resolved_breakpoints(),
+            &[(4, 20)],
+            "o breakpoint continua valendo depois do restart"
+        );
+        assert!(
+            saida
+                .iter()
+                .any(|o| matches!(o, Outgoing::Event(e) if e.event == "breakpoint")),
+            "o editor precisa saber onde cada marcador ficou"
+        );
     }
 
     /// Sem `serverCommand` (attach), o servidor não é nosso: reiniciá-lo não é
