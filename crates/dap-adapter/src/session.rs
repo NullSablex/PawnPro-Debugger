@@ -21,6 +21,10 @@ pub enum Outgoing {
     /// Subir o servidor do jogo como processo FILHO do adaptador. Morre junto com
     /// o adaptador (encerrar/reiniciar), sem o editor rastrear nada.
     SpawnServer(SpawnSpec),
+    /// Derrubar o servidor atual e subir outro com a **mesma** `session`,
+    /// mantendo a sessão de depuração viva. O plugin reabre o socket nomeado e
+    /// o `plugin_client` reconecta pelo retry que já existe.
+    RespawnServer(SpawnSpec),
     /// Conectar no plugin pelo id de sessão do socket local (pedido no `launch`).
     ConnectPlugin(String),
     /// Encaminhar um comando ao plugin (breakpoints/continue/step).
@@ -40,6 +44,7 @@ pub enum Outgoing {
 }
 
 /// Comando do servidor a executar, mais as variáveis de depuração que o plugin lê.
+#[derive(Clone)]
 pub struct SpawnSpec {
     pub exe: String,
     pub args: Vec<String>,
@@ -78,6 +83,13 @@ pub struct Session {
     /// Idioma das mensagens do adaptador, do `locale` do `initialize`.
     locale: Locale,
     terminated: bool,
+    /// Como o servidor foi iniciado, guardado do `launch`.
+    ///
+    /// É o que permite reiniciá-lo **sem encerrar a sessão**: o canal
+    /// plugin↔adaptador é um socket nomeado pela `session`, não parentesco de
+    /// processo, então um servidor novo com a mesma `session` reabre o mesmo
+    /// canal e o `plugin_client` reconecta pelo retry que já existe.
+    spawn_spec: Option<SpawnSpec>,
 }
 
 impl Session {
@@ -162,6 +174,10 @@ impl Session {
         let caps = json!({
             "supportsConfigurationDoneRequest": true,
             "supportsTerminateRequest": true,
+            // Sem isto o editor encerra e recria a sessão para reiniciar. Com
+            // isto ele manda `restart`, e o servidor é trocado por baixo sem a
+            // depuração cair.
+            "supportsRestartRequest": true,
             "supportsEvaluateForHovers": true,
             "supportsConditionalBreakpoints": true,
             "supportsHitConditionalBreakpoints": true,
@@ -249,14 +265,16 @@ impl Session {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
-                out.push(Outgoing::SpawnServer(SpawnSpec {
+                let spec = SpawnSpec {
                     exe,
                     args,
                     cwd,
                     session: session_id.clone(),
                     amx_path,
                     locale,
-                }));
+                };
+                self.spawn_spec = Some(spec.clone());
+                out.push(Outgoing::SpawnServer(spec));
             }
         }
 
@@ -893,13 +911,46 @@ impl Session {
     /// velho), encerramos a sessão com `terminated` + `restart`, fazendo o editor
     /// relançar do zero — passando pelo nosso fluxo que derruba o servidor antigo,
     /// espera a porta e sobe um novo.
+    /// Reinicia o servidor **mantendo a sessão de depuração viva**.
+    ///
+    /// Antes isto encerrava a sessão (`terminated` com `restart: true`) e
+    /// deixava o editor recriar tudo — o que derrubava a depuração a cada
+    /// recarga do gamemode, justamente o ciclo mais comum de quem depura.
+    ///
+    /// Dá para fazer melhor porque o canal plugin↔adaptador é um **socket
+    /// nomeado** pela `session`, não parentesco de processo: matando o servidor
+    /// e subindo outro com a mesma `session`, o plugin reabre o mesmo socket e
+    /// o `plugin_client` reconecta pelo retry que já existia.
+    ///
+    /// O estado que vale continua no adaptador — breakpoints de linha, de
+    /// função e o bloco de debug — então nada precisa ser reenviado pelo editor.
+    ///
+    /// Sem `spawn_spec` (sessão de *attach*, em que o servidor não é nosso),
+    /// cai no comportamento antigo: quem subiu o servidor é quem sabe reiniciá-lo.
     fn on_restart(&mut self, req: &Request) -> Vec<Outgoing> {
-        self.terminated = true;
+        let Some(spec) = self.spawn_spec.clone() else {
+            self.terminated = true;
+            let seq = self.next_seq();
+            let ev_seq = self.next_seq();
+            return vec![
+                Outgoing::Response(Response::ok(seq, req, Value::Null)),
+                Outgoing::Event(Event::new(ev_seq, "terminated", json!({ "restart": true }))),
+            ];
+        };
+
         let seq = self.next_seq();
-        let resp = Response::ok(seq, req, Value::Null);
         let ev_seq = self.next_seq();
-        let ev = Event::new(ev_seq, "terminated", json!({ "restart": true }));
-        vec![Outgoing::Response(resp), Outgoing::Event(ev)]
+        // `continued` avisa o editor de que não há mais frame parado: o processo
+        // que os produzia acabou de morrer, e os painéis precisam limpar.
+        vec![
+            Outgoing::RespawnServer(spec),
+            Outgoing::Response(Response::ok(seq, req, Value::Null)),
+            Outgoing::Event(Event::new(
+                ev_seq,
+                "continued",
+                json!({ "threadId": 1, "allThreadsContinued": true }),
+            )),
+        ]
     }
 
     /// Breakpoints resolvidos a endereço (para o plugin, no futuro).
@@ -1066,6 +1117,62 @@ mod tests {
         // Inválido.
         assert_eq!(parse_set_value("abc"), None);
         assert_eq!(parse_set_value(""), None);
+    }
+
+    /// Um `launch` com `serverCommand` guarda como o servidor foi iniciado, e é
+    /// isso que permite reiniciá-lo depois sem derrubar a sessão.
+    #[test]
+    fn restart_troca_o_servidor_sem_encerrar_a_sessao() {
+        let mut ses = Session::new();
+        let saida = ses.handle(&req(
+            "launch",
+            &json!({
+                "program": "/tmp/gm.amx",
+                "session": "s1",
+                "serverCommand": { "exe": "/tmp/omp-server", "args": [], "cwd": "/tmp" }
+            }),
+        ));
+        assert!(
+            saida.iter().any(|o| matches!(o, Outgoing::SpawnServer(_))),
+            "o launch deve subir o servidor"
+        );
+
+        let saida = ses.handle(&req("restart", &json!({})));
+        assert!(
+            saida
+                .iter()
+                .any(|o| matches!(o, Outgoing::RespawnServer(_))),
+            "o restart deve trocar o servidor"
+        );
+        assert!(
+            !saida
+                .iter()
+                .any(|o| matches!(o, Outgoing::Event(e) if e.event == "terminated")),
+            "o restart NÃO deve encerrar a sessão"
+        );
+        assert!(!ses.terminated, "a sessão segue viva depois do restart");
+    }
+
+    /// Sem `serverCommand` (attach), o servidor não é nosso: reiniciá-lo não é
+    /// atribuição do adaptador, e o comportamento antigo continua valendo.
+    #[test]
+    fn restart_sem_servidor_proprio_encerra_como_antes() {
+        let mut ses = Session::new();
+        ses.handle(&req("launch", &json!({ "program": "/tmp/gm.amx" })));
+
+        let saida = ses.handle(&req("restart", &json!({})));
+        assert!(
+            !saida
+                .iter()
+                .any(|o| matches!(o, Outgoing::RespawnServer(_))),
+            "sem spawn_spec não há o que reiniciar"
+        );
+        assert!(
+            saida
+                .iter()
+                .any(|o| matches!(o, Outgoing::Event(e) if e.event == "terminated")),
+            "cai no comportamento antigo: encerra e deixa o editor recriar"
+        );
     }
 
     fn req(command: &str, args: &Value) -> Request {

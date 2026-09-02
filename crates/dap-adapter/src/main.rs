@@ -52,6 +52,29 @@ fn main() -> io::Result<()> {
                         }),
                     ),
                 },
+                Outgoing::RespawnServer(spec) => {
+                    // Derruba o servidor atual: o `Drop` do `ServerChild` mata o
+                    // processo e espera. Só então sobe o próximo — o socket do
+                    // plugin precisa ser liberado antes de o novo abri-lo, e o
+                    // `listen_with_retry` do plugin cobre a folga que sobrar.
+                    server = None;
+                    match spawn_server(&spec, &out) {
+                        Ok(child) => {
+                            server = Some(child);
+                            // O canal antigo morreu com o processo. Reconectar
+                            // pelo mesmo id: o `PluginClient` já traz retry, e o
+                            // plugin reabre o socket ao carregar.
+                            plugin = Some(PluginClient::connect(&spec.session, out.clone()));
+                        }
+                        Err(e) => out.event(
+                            "output",
+                            serde_json::json!({
+                                "category": "stderr",
+                                "output": format!("Falha ao reiniciar o servidor: {e}\n"),
+                            }),
+                        ),
+                    }
+                }
                 Outgoing::ConnectPlugin(id) => {
                     // A conexão é assíncrona (com retry e feedback próprios);
                     // não bloqueia o loop nem falha de imediato.
