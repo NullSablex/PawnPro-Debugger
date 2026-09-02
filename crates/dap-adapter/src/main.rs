@@ -177,10 +177,40 @@ fn forward_stream<R: io::Read + Send + 'static>(stream: R, category: &'static st
     std::thread::spawn(move || pump_stream(stream, category, &out));
 }
 
+/// Bytes do console do servidor em texto.
+///
+/// O SA-MP/open.mp escreve o console em Windows-1252, não em UTF-8: em
+/// português `ção` sai como `\xe7\xe3o`, que `from_utf8_lossy` trocaria por `�`.
+/// Tentamos UTF-8 primeiro — é o que um gamemode moderno pode emitir — e só
+/// caímos no cp1252 quando a sequência não é UTF-8 válida.
+///
+/// A conversão é direta e sem dependência: em cp1252 os bytes 0xA0–0xFF já são
+/// os mesmos code points Unicode (herança do Latin-1); apenas 0x80–0x9F têm
+/// tabela própria.
+fn decodificar_console(bytes: &[u8]) -> String {
+    /// Os 32 code points de 0x80–0x9F, onde cp1252 difere do Latin-1.
+    const ALTOS: [char; 32] = [
+        '\u{20AC}', '\u{81}', '\u{201A}', '\u{192}', '\u{201E}', '\u{2026}', '\u{2020}',
+        '\u{2021}', '\u{2C6}', '\u{2030}', '\u{160}', '\u{2039}', '\u{152}', '\u{8D}', '\u{17D}',
+        '\u{8F}', '\u{90}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}',
+        '\u{2014}', '\u{2DC}', '\u{2122}', '\u{161}', '\u{203A}', '\u{153}', '\u{9D}', '\u{17E}',
+        '\u{178}',
+    ];
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_owned();
+    }
+    bytes
+        .iter()
+        .map(|&b| match b {
+            0x80..=0x9F => ALTOS[usize::from(b - 0x80)],
+            _ => char::from(b),
+        })
+        .collect()
+}
+
 /// Lógica síncrona de `forward_stream`, isolada para ser testável sem thread.
 /// Lê `stream` linha a linha e emite cada linha como `output`. `read_until('\n')`
-/// (em vez de `lines()`) preserva a quebra de linha e a última linha sem `\n`, e
-/// não falha com bytes não-UTF-8 (lidos com substituição).
+/// (em vez de `lines()`) preserva a quebra de linha e a última linha sem `\n`.
 fn pump_stream<R: io::Read>(stream: R, category: &'static str, out: &DapOut) {
     use std::io::BufRead;
     let mut reader = BufReader::new(stream);
@@ -189,7 +219,7 @@ fn pump_stream<R: io::Read>(stream: R, category: &'static str, out: &DapOut) {
         if n == 0 {
             break; // EOF — o servidor fechou a pipe
         }
-        let text = String::from_utf8_lossy(&buf).into_owned();
+        let text = decodificar_console(&buf);
         out.event(
             "output",
             serde_json::json!({ "category": category, "output": text }),
@@ -256,6 +286,26 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
+    /// O console do SA-MP/open.mp é Windows-1252: `from_utf8_lossy` trocava
+    /// cada acento por `\u{FFFD}` no CONSOLE DE DEPURAÇÃO.
+    #[test]
+    fn console_decodifica_windows1252() {
+        // Bytes como o servidor os escreve: "ção" = 0xE7 0xE3 0x6F.
+        let cru = b"deslocamento=4 (acentua\xe7\xe3o: cora\xe7\xe3o)\n";
+        assert_eq!(
+            decodificar_console(cru),
+            "deslocamento=4 (acentuação: coração)\n"
+        );
+    }
+
+    /// UTF-8 válido tem prioridade: um gamemode moderno pode emitir UTF-8, e
+    /// interpretá-lo como cp1252 daria mojibake ao contrário.
+    #[test]
+    fn console_preserva_utf8_valido() {
+        assert_eq!(decodificar_console("ação".as_bytes()), "ação");
+        assert_eq!(decodificar_console(b"plain ascii"), "plain ascii");
+    }
+
     #[test]
     fn base64_encode_matches_rfc() {
         assert_eq!(base64_encode(b""), "");
@@ -295,8 +345,9 @@ mod tests {
         assert!(raw.contains("alpha\\n"));
         assert!(raw.contains("beta")); // última linha sem `\n` ainda é emitida
         assert!(raw.contains("\"category\":\"stdout\""));
-        // O byte inválido não derruba nada (substituído por U+FFFD, emitido como
-        // UTF-8 cru pelo serde, não escapado).
-        assert!(raw.contains('\u{fffd}'));
+        // Byte que não é UTF-8 válido não derruba nada e não vira `\u{FFFD}`:
+        // cai na leitura cp1252, onde 0xFF é `ÿ`.
+        assert!(raw.contains('ÿ'));
+        assert!(!raw.contains('\u{fffd}'));
     }
 }
