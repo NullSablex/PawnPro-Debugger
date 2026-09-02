@@ -80,6 +80,11 @@ pub struct Session {
     /// `setBreakpoints`). Usado no `stackTrace` para o frame apontar à fonte —
     /// senão o editor mostra "Origem Desconhecida".
     source_path: Option<String>,
+    /// Guarda contra laço: o restart pede a recompilação por evento e a
+    /// extensão reenvia o `restart`. Sem isto, um `.pwn` cuja data continuasse
+    /// à frente do `.amx` (compilação falhou, relógio adiantado) pediria
+    /// rebuild para sempre.
+    rebuild_pedido: bool,
     /// Idioma das mensagens do adaptador, do `locale` do `initialize`.
     locale: Locale,
     terminated: bool,
@@ -98,6 +103,27 @@ pub struct Session {
     /// processo, então um servidor novo com a mesma `session` reabre o mesmo
     /// canal e o `plugin_client` reconecta pelo retry que já existe.
     spawn_spec: Option<SpawnSpec>,
+}
+
+/// `true` se o `.pwn` ao lado do `.amx` foi modificado depois dele.
+///
+/// Sem os dois arquivos, ou sem conseguir ler as datas, responde `false`:
+/// pedir uma recompilação que talvez não seja possível travaria o restart.
+fn fonte_mais_novo(amx: &str) -> bool {
+    let Some(fonte) = amx
+        .strip_suffix(".amx")
+        .or_else(|| amx.strip_suffix(".AMX"))
+        .map(|base| format!("{base}.pwn"))
+    else {
+        return false;
+    };
+    let (Ok(f), Ok(a)) = (std::fs::metadata(&fonte), std::fs::metadata(amx)) else {
+        return false;
+    };
+    let (Ok(fm), Ok(am)) = (f.modified(), a.modified()) else {
+        return false;
+    };
+    fm > am
 }
 
 impl Session {
@@ -986,6 +1012,28 @@ impl Session {
             ];
         };
 
+        // Fonte mais novo que o binário: recompilar é atribuição da extensão
+        // (o compilador e as flags são conhecimento dela), então pedimos por
+        // evento e paramos aqui — ela compila e reenvia o `restart`. A
+        // verificação fica NESTE ponto porque é por onde todo restart passa,
+        // venha do botão nativo do editor ou do comando do PawnPro.
+        if !self.rebuild_pedido && fonte_mais_novo(&spec.amx_path) {
+            self.rebuild_pedido = true;
+            let seq = self.next_seq();
+            let ev_seq = self.next_seq();
+            return vec![
+                Outgoing::Response(Response::ok(seq, req, Value::Null)),
+                Outgoing::Event(Event::new(
+                    ev_seq,
+                    "pawnproRebuild",
+                    json!({ "program": spec.amx_path }),
+                )),
+            ];
+        }
+        // Chegou aqui: ou o binário está em dia, ou a extensão acabou de
+        // recompilar. O ciclo se fecha para o próximo restart.
+        self.rebuild_pedido = false;
+
         // O `.amx` pode ter sido recompilado entre a sessão e o restart — é o
         // motivo mais comum para reiniciar. O mapa linha↔endereço muda junto,
         // então recarregar o bloco de debug e reresolver os breakpoints é o que
@@ -1358,6 +1406,58 @@ mod tests {
             has_command(&saida, |c| matches!(c, Command::Configured)),
             "e liberar a VM, que fica bloqueada na carga esperando o sinal"
         );
+    }
+
+    /// Fonte mais novo que o binário: o restart pede a recompilação à extensão
+    /// em vez de subir o servidor com o `.amx` velho — os breakpoints se
+    /// resolveriam contra o mapa antigo, e a VM pararia no lugar errado.
+    #[test]
+    fn restart_pede_rebuild_quando_o_fonte_mudou() {
+        let dir = std::env::temp_dir().join("pawnpro-teste-rebuild");
+        std::fs::create_dir_all(&dir).unwrap();
+        let amx = dir.join("gm.amx");
+        let pwn = dir.join("gm.pwn");
+        std::fs::write(&amx, b"binario").unwrap();
+        // O fonte é escrito depois, então é o mais novo.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&pwn, b"fonte").unwrap();
+
+        let mut ses = Session::new();
+        ses.handle(&req(
+            "launch",
+            &json!({
+                "program": amx.to_str().unwrap(),
+                "session": "s1",
+                "serverCommand": { "exe": "/tmp/omp-server", "args": [], "cwd": "/tmp" }
+            }),
+        ));
+
+        let saida = ses.handle(&req("restart", &json!({})));
+        assert!(
+            saida
+                .iter()
+                .any(|o| matches!(o, Outgoing::Event(e) if e.event == "pawnproRebuild")),
+            "o fonte é mais novo: tem de pedir a recompilação"
+        );
+        assert!(
+            !saida.iter().any(|o| matches!(o, Outgoing::SpawnServer(_))),
+            "e NÃO subir o servidor com o binário velho"
+        );
+
+        // A extensão compila e reenvia: agora o restart segue normalmente, sem
+        // pedir de novo — senão seria laço.
+        let saida = ses.handle(&req("restart", &json!({})));
+        assert!(
+            saida.iter().any(|o| matches!(o, Outgoing::SpawnServer(_))),
+            "no reenvio o servidor sobe"
+        );
+        assert!(
+            !saida
+                .iter()
+                .any(|o| matches!(o, Outgoing::Event(e) if e.event == "pawnproRebuild")),
+            "e não pede rebuild de novo"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Sem `serverCommand` (attach), o servidor não é nosso: reiniciá-lo não é
