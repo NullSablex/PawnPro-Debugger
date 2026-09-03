@@ -8,6 +8,23 @@ Podem existir falhas ou itens não declarados, causados por falha humana ou por 
 
 ---
 
+## [0.2.1] - 03/09/2026
+
+Correções no reinício da depuração e nos breakpoints.
+
+### Corrigido
+- **Reiniciar deixa de encerrar a sessão** — o restart relançava o adaptador inteiro, e como o servidor é processo filho dele tudo caía junto: o editor abria uma sessão nova, com os breakpoints reresolvidos do zero. Agora o processo é trocado por baixo e a sessão continua viva. A identidade passa a ser o canal **nomeado** pela `session`, não o parentesco de processo — subindo outro servidor com a mesma `session`, o plugin reabre o mesmo socket e o cliente reconecta pelo retry que já existia
+- **Breakpoints chegam ao plugin** — o editor manda `setBreakpoints` antes do `launch`, e a fila que os guardava era descartada quando o cliente do plugin era trocado. Era ali que os marcadores estavam esperando
+- **Breakpoints reresolvidos contra o `.amx` novo** — o binário costuma ser recompilado entre uma sessão e outra, que é o motivo mais comum de reiniciar, e o mapa linha↔endereço muda junto. Sem recarregar o bloco de debug, a VM parava no lugar errado
+- **Breakpoints armados no servidor novo** — depois da troca de processo eles existiam no adaptador, mas nunca eram enviados ao plugin recém-conectado
+- **Console lido em Windows-1252** — a saída do servidor vinha nessa codificação e era lida como UTF-8: cada acento virava um caractere de substituição no meio das mensagens
+
+### Adicionado
+- **Recompilação no reinício** — reiniciar com o fonte alterado deixava o servidor subir com o binário velho. O adaptador compara as datas e pede a recompilação por evento; compilar é atribuição da extensão, que conhece o compilador e as flags. A verificação fica no ponto por onde todo restart passa, venha do botão nativo, da tecla ou da paleta
+- **Plugin e adaptador se identificam ao conectar** — o diagnóstico passa a dizer qual versão está de cada lado quando as duas divergem
+
+---
+
 ## [0.2.0] - 01/09/2026
 
 Segundo pré-lançamento. Amplia o conjunto DAP suportado: a depuração deixa de ser
