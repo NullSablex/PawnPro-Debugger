@@ -18,8 +18,11 @@ use crate::messages::{Event, Request, Response};
 pub enum Outgoing {
     Response(Response),
     Event(Event),
-    /// Subir o servidor do jogo como processo FILHO do adaptador. Morre junto com
-    /// o adaptador (encerrar/reiniciar), sem o editor rastrear nada.
+    /// Pôr um servidor no lugar do que houver, como processo FILHO do
+    /// adaptador. Serve tanto ao `launch` (não há o que derrubar) quanto ao
+    /// `restart` (derruba o atual e sobe outro com a mesma `session`, mantendo
+    /// a sessão de depuração viva). O filho morre junto com o adaptador, sem o
+    /// editor rastrear nada.
     SpawnServer(SpawnSpec),
     /// Conectar no plugin pelo id de sessão do socket local (pedido no `launch`).
     ConnectPlugin(String),
@@ -40,6 +43,7 @@ pub enum Outgoing {
 }
 
 /// Comando do servidor a executar, mais as variáveis de depuração que o plugin lê.
+#[derive(Clone)]
 pub struct SpawnSpec {
     pub exe: String,
     pub args: Vec<String>,
@@ -53,6 +57,7 @@ pub struct SpawnSpec {
 
 /// Um breakpoint como pedido pelo editor (DAP), antes de resolver a linha em
 /// endereço. Campos opcionais espelham os modificadores do DAP.
+#[derive(Clone)]
 struct ReqBp {
     line: i32,
     condition: Option<String>,
@@ -75,9 +80,50 @@ pub struct Session {
     /// `setBreakpoints`). Usado no `stackTrace` para o frame apontar à fonte —
     /// senão o editor mostra "Origem Desconhecida".
     source_path: Option<String>,
+    /// Guarda contra laço: o restart pede a recompilação por evento e a
+    /// extensão reenvia o `restart`. Sem isto, um `.pwn` cuja data continuasse
+    /// à frente do `.amx` (compilação falhou, relógio adiantado) pediria
+    /// rebuild para sempre.
+    rebuild_pedido: bool,
     /// Idioma das mensagens do adaptador, do `locale` do `initialize`.
     locale: Locale,
     terminated: bool,
+    /// Breakpoints como o editor os pediu — linha e modificadores, antes de
+    /// virarem endereço.
+    ///
+    /// O endereço depende do `.amx`: recompilar o gamemode muda o mapa
+    /// linha↔endereço, e os endereços resolvidos antes passam a apontar para
+    /// instruções erradas. Guardar o pedido original é o que permite resolver
+    /// tudo de novo depois de um restart.
+    requested_bps: Vec<(String, Vec<ReqBp>)>,
+    /// Como o servidor foi iniciado, guardado do `launch`.
+    ///
+    /// É o que permite reiniciá-lo **sem encerrar a sessão**: o canal
+    /// plugin↔adaptador é um socket nomeado pela `session`, não parentesco de
+    /// processo, então um servidor novo com a mesma `session` reabre o mesmo
+    /// canal e o `plugin_client` reconecta pelo retry que já existe.
+    spawn_spec: Option<SpawnSpec>,
+}
+
+/// `true` se o `.pwn` ao lado do `.amx` foi modificado depois dele.
+///
+/// Sem os dois arquivos, ou sem conseguir ler as datas, responde `false`:
+/// pedir uma recompilação que talvez não seja possível travaria o restart.
+fn fonte_mais_novo(amx: &str) -> bool {
+    let Some(fonte) = amx
+        .strip_suffix(".amx")
+        .or_else(|| amx.strip_suffix(".AMX"))
+        .map(|base| format!("{base}.pwn"))
+    else {
+        return false;
+    };
+    let (Ok(f), Ok(a)) = (std::fs::metadata(&fonte), std::fs::metadata(amx)) else {
+        return false;
+    };
+    let (Ok(fm), Ok(am)) = (f.modified(), a.modified()) else {
+        return false;
+    };
+    fm > am
 }
 
 impl Session {
@@ -157,11 +203,15 @@ impl Session {
             .and_then(Value::as_str)
             .map_or_else(Locale::default, Locale::from_tag);
         let runtime_label = messages::msg(self.locale, MsgKey::RuntimeErrorsLabel);
-        // Capabilities mínimas da v1. `supportsEvaluateForHovers` reaproveita o
-        // `evaluate` do painel INSPEÇÃO ao passar o mouse no código.
+        // `supportsEvaluateForHovers` reaproveita o `evaluate` do painel
+        // INSPEÇÃO ao passar o mouse no código.
         let caps = json!({
             "supportsConfigurationDoneRequest": true,
             "supportsTerminateRequest": true,
+            // Sem isto o editor encerra e recria a sessão para reiniciar. Com
+            // isto ele manda `restart`, e o servidor é trocado por baixo sem a
+            // depuração cair.
+            "supportsRestartRequest": true,
             "supportsEvaluateForHovers": true,
             "supportsConditionalBreakpoints": true,
             "supportsHitConditionalBreakpoints": true,
@@ -176,10 +226,6 @@ impl Session {
             "exceptionBreakpointFilters": [
                 { "filter": "runtime", "label": runtime_label, "default": true }
             ],
-            // NÃO declaramos `supportsRestartRequest`: assim o editor faz o
-            // restart como disconnect + novo launch, que passa pelo nosso fluxo
-            // (derruba o servidor antigo, espera a porta, sobe um novo) — o único
-            // jeito de o código de carga rodar de novo.
         });
         let seq = self.next_seq();
         let resp = Response::ok(seq, req, caps);
@@ -249,23 +295,84 @@ impl Session {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
-                out.push(Outgoing::SpawnServer(SpawnSpec {
+                let spec = SpawnSpec {
                     exe,
                     args,
                     cwd,
                     session: session_id.clone(),
                     amx_path,
                     locale,
-                }));
+                };
+                self.spawn_spec = Some(spec.clone());
+                out.push(Outgoing::SpawnServer(spec));
             }
         }
 
         let seq = self.next_seq();
-        // O adaptador conecta no plugin com retry (o servidor leva um tempo para
-        // subir e abrir o socket), então a ordem spawn → connect não exige espera.
-        out.push(Outgoing::ConnectPlugin(session_id));
+        // Com servidor próprio, quem sobe já conecta (o handler do `SpawnServer`
+        // faz as duas coisas, e a conexão traz retry porque o servidor leva um
+        // tempo para abrir o socket). Sem ele — attach — este é o único caminho.
+        if self.spawn_spec.is_none() {
+            out.push(Outgoing::ConnectPlugin(session_id));
+        }
         out.push(Outgoing::Response(Response::ok(seq, req, Value::Null)));
         out
+    }
+
+    /// Resolve todos os breakpoints de linha pedidos contra o bloco de debug
+    /// atual, substituindo os endereços anteriores.
+    ///
+    /// Roda no `setBreakpoints` e de novo no `restart`: o endereço depende do
+    /// `.amx`, e recompilar o gamemode muda o mapa linha↔endereço. Sem
+    /// reresolver, os endereços antigos apontariam para instruções erradas —
+    /// a VM pararia no lugar errado, ou em lugar nenhum.
+    ///
+    /// Devolve o `verified` de cada breakpoint, na ordem em que foram pedidos.
+    fn resolver_bps_de_linha(&mut self) -> Vec<Value> {
+        self.breakpoints.clear();
+        let mut verified = Vec::new();
+        let mut line_bps = Vec::new();
+
+        for (arquivo, pedidos) in self.requested_bps.clone() {
+            let file = if arquivo.is_empty() {
+                None
+            } else {
+                Some(arquivo.as_str())
+            };
+            for ReqBp {
+                line,
+                condition,
+                hit_condition,
+                log_message,
+            } in pedidos
+            {
+                let addr = self
+                    .dbg
+                    .as_ref()
+                    .and_then(|d| d.line_to_address(line, file));
+                if let Some(a) = addr {
+                    self.breakpoints.push((line, a));
+                    line_bps.push(Breakpoint {
+                        addr: a,
+                        condition,
+                        hit_condition,
+                        log_message,
+                    });
+                }
+                // Um breakpoint é "verificado" quando casou um endereço real. A
+                // linha pedida pode não ser "quebrável" — o endereço desliza para
+                // a próxima linha executável. Devolvemos a linha REAL (via
+                // `lookup_line`) para o editor reposicionar o marcador onde a VM
+                // vai de fato parar.
+                let actual_line = addr
+                    .and_then(|a| self.dbg.as_ref().and_then(|d| d.lookup_line(a)))
+                    .unwrap_or(line);
+                verified.push(json!({ "verified": addr.is_some(), "line": actual_line }));
+            }
+        }
+
+        self.line_bps = line_bps;
+        verified
     }
 
     fn on_set_breakpoints(&mut self, req: &Request) -> Vec<Outgoing> {
@@ -315,42 +422,13 @@ impl Session {
             })
             .unwrap_or_default();
 
-        self.breakpoints.clear();
-        let mut verified = Vec::new();
-        let mut line_bps = Vec::new();
-        for ReqBp {
-            line,
-            condition,
-            hit_condition,
-            log_message,
-        } in requested
-        {
-            let addr = self
-                .dbg
-                .as_ref()
-                .and_then(|d| d.line_to_address(line, file));
-            if let Some(a) = addr {
-                self.breakpoints.push((line, a));
-                line_bps.push(Breakpoint {
-                    addr: a,
-                    condition,
-                    hit_condition,
-                    log_message,
-                });
-            }
-            // Um breakpoint é "verificado" quando casou um endereço real. A linha
-            // pedida pode não ser "quebrável" — o endereço desliza para a próxima
-            // linha executável. Devolvemos a linha REAL (via `lookup_line` do
-            // endereço) para o editor reposicionar o marcador onde a VM vai parar.
-            let actual_line = addr
-                .and_then(|a| self.dbg.as_ref().and_then(|d| d.lookup_line(a)))
-                .unwrap_or(line);
-            verified.push(json!({ "verified": addr.is_some(), "line": actual_line }));
-        }
+        // Guarda o pedido como veio: é o que permite resolver tudo de novo se o
+        // `.amx` mudar (recompilação + restart).
+        let chave = file.unwrap_or_default().to_string();
+        self.requested_bps.retain(|(f, _)| f != &chave);
+        self.requested_bps.push((chave, requested.clone()));
 
-        // Substitui os breakpoints de LINHA e envia a união (linha + função) — o
-        // plugin mantém um único conjunto.
-        self.line_bps = line_bps;
+        let verified = self.resolver_bps_de_linha();
         let breakpoints = self.all_breakpoints();
         let body = json!({ "breakpoints": verified });
         self.reply_with(req, Command::SetBreakpoints { breakpoints }, body)
@@ -405,8 +483,22 @@ impl Session {
     /// `configurationDone`: o cliente terminou de enviar a configuração inicial
     /// (breakpoints). Sinaliza `Configured` ao plugin, que então libera a VM
     /// segura na carga — assim breakpoints em `OnGameModeInit` e afins são pegos.
+    /// `configurationDone`: o editor terminou de configurar a sessão.
+    ///
+    /// Reenvia os breakpoints antes de liberar a VM. O editor manda
+    /// `setBreakpoints` **antes** do `launch`, quando ainda não há canal com o
+    /// plugin — e comando sem canal é descartado. Este é o ponto do protocolo
+    /// em que tudo já foi configurado e o servidor já está subindo, então é aqui
+    /// que o conjunto real de breakpoints tem de chegar ao plugin.
     fn on_configuration_done(&mut self, req: &Request) -> Vec<Outgoing> {
-        self.reply_with(req, Command::Configured, Value::Null)
+        let seq = self.next_seq();
+        vec![
+            Outgoing::ToPlugin(Command::SetBreakpoints {
+                breakpoints: self.all_breakpoints(),
+            }),
+            Outgoing::ToPlugin(Command::Configured),
+            Outgoing::Response(Response::ok(seq, req, Value::Null)),
+        ]
     }
 
     /// `continue`: retoma a VM (manda `Continue` ao plugin).
@@ -893,25 +985,124 @@ impl Session {
     /// velho), encerramos a sessão com `terminated` + `restart`, fazendo o editor
     /// relançar do zero — passando pelo nosso fluxo que derruba o servidor antigo,
     /// espera a porta e sobe um novo.
+    /// Reinicia o servidor **mantendo a sessão de depuração viva**.
+    ///
+    /// Antes isto encerrava a sessão (`terminated` com `restart: true`) e
+    /// deixava o editor recriar tudo — o que derrubava a depuração a cada
+    /// recarga do gamemode, justamente o ciclo mais comum de quem depura.
+    ///
+    /// Dá para fazer melhor porque o canal plugin↔adaptador é um **socket
+    /// nomeado** pela `session`, não parentesco de processo: matando o servidor
+    /// e subindo outro com a mesma `session`, o plugin reabre o mesmo socket e
+    /// o `plugin_client` reconecta pelo retry que já existia.
+    ///
+    /// O estado que vale continua no adaptador — breakpoints de linha, de
+    /// função e o bloco de debug — então nada precisa ser reenviado pelo editor.
+    ///
+    /// Sem `spawn_spec` (sessão de *attach*, em que o servidor não é nosso),
+    /// cai no comportamento antigo: quem subiu o servidor é quem sabe reiniciá-lo.
     fn on_restart(&mut self, req: &Request) -> Vec<Outgoing> {
-        self.terminated = true;
+        let Some(spec) = self.spawn_spec.clone() else {
+            self.terminated = true;
+            let seq = self.next_seq();
+            let ev_seq = self.next_seq();
+            return vec![
+                Outgoing::Response(Response::ok(seq, req, Value::Null)),
+                Outgoing::Event(Event::new(ev_seq, "terminated", json!({ "restart": true }))),
+            ];
+        };
+
+        // Fonte mais novo que o binário: recompilar é atribuição da extensão
+        // (o compilador e as flags são conhecimento dela), então pedimos por
+        // evento e paramos aqui — ela compila e reenvia o `restart`. A
+        // verificação fica NESTE ponto porque é por onde todo restart passa,
+        // venha do botão nativo do editor ou do comando do PawnPro.
+        if !self.rebuild_pedido && fonte_mais_novo(&spec.amx_path) {
+            self.rebuild_pedido = true;
+            let seq = self.next_seq();
+            let ev_seq = self.next_seq();
+            return vec![
+                Outgoing::Response(Response::ok(seq, req, Value::Null)),
+                Outgoing::Event(Event::new(
+                    ev_seq,
+                    "pawnproRebuild",
+                    json!({ "program": spec.amx_path }),
+                )),
+            ];
+        }
+        // Chegou aqui: ou o binário está em dia, ou a extensão acabou de
+        // recompilar. O ciclo se fecha para o próximo restart.
+        self.rebuild_pedido = false;
+
+        // O `.amx` pode ter sido recompilado entre a sessão e o restart — é o
+        // motivo mais comum para reiniciar. O mapa linha↔endereço muda junto,
+        // então recarregar o bloco de debug e reresolver os breakpoints é o que
+        // impede a VM de parar no lugar errado.
+        if let Ok(bytes) = std::fs::read(&spec.amx_path)
+            && let Ok(dbg) = AmxDbg::from_amx(&bytes).or_else(|_| AmxDbg::parse(&bytes))
+        {
+            self.dbg = Some(dbg);
+        }
+        let verified = self.resolver_bps_de_linha();
+
         let seq = self.next_seq();
-        let resp = Response::ok(seq, req, Value::Null);
         let ev_seq = self.next_seq();
-        let ev = Event::new(ev_seq, "terminated", json!({ "restart": true }));
-        vec![Outgoing::Response(resp), Outgoing::Event(ev)]
+        let bp_seq = self.next_seq();
+        // `continued` avisa o editor de que não há mais frame parado: o processo
+        // que os produzia acabou de morrer, e os painéis precisam limpar.
+        // Os `breakpoint` avisam onde cada marcador ficou depois da recompilação
+        // — a linha pode ter andado, ou o breakpoint deixado de ser válido.
+        let sessao = spec.session.clone();
+        let mut saida = vec![
+            Outgoing::SpawnServer(spec),
+            // O canal antigo morreu com o processo, e o `PluginClient` só tem
+            // retry na conexão inicial — reusá-lo mandaria comandos para um
+            // socket morto. Reconectar aqui é o que dá um canal vivo ao plugin
+            // do servidor novo.
+            Outgoing::ConnectPlugin(sessao),
+            // E o plugin novo sobe sem breakpoint nenhum: o estado morreu junto
+            // com o processo anterior. Reresolver os endereços e avisar o editor
+            // não basta — sem isto a VM roda sem saber onde parar, e a execução
+            // passa direto pelo breakpoint.
+            Outgoing::ToPlugin(Command::SetBreakpoints {
+                breakpoints: self.all_breakpoints(),
+            }),
+            // O plugin bloqueia a VM na carga esperando este sinal (com timeout
+            // de 10 s). Sem ele o servidor novo ficaria parado até o timeout, e
+            // breakpoints em `OnGameModeInit` e afins se perderiam.
+            Outgoing::ToPlugin(Command::Configured),
+            Outgoing::Response(Response::ok(seq, req, Value::Null)),
+            Outgoing::Event(Event::new(
+                ev_seq,
+                "continued",
+                json!({ "threadId": 1, "allThreadsContinued": true }),
+            )),
+        ];
+
+        // Um `breakpoint` por marcador, com a linha onde ele de fato ficou.
+        for (i, v) in verified.iter().enumerate() {
+            let mut corpo = v.clone();
+            if let Some(obj) = corpo.as_object_mut() {
+                obj.insert("id".into(), json!(i + 1));
+            }
+            saida.push(Outgoing::Event(Event::new(
+                bp_seq + i64::try_from(i).unwrap_or(0),
+                "breakpoint",
+                json!({ "reason": "changed", "breakpoint": corpo }),
+            )));
+        }
+        saida
     }
 
-    /// Breakpoints resolvidos a endereço (para o plugin, no futuro).
-    #[allow(dead_code)] // consumido pelo Componente 2 (envio ao plugin)
+    /// Breakpoints de linha resolvidos a endereço de código.
+    #[cfg(test)]
     #[must_use]
     pub fn resolved_breakpoints(&self) -> &[(i32, u32)] {
         &self.breakpoints
     }
 
-    /// Injeta um bloco de debug diretamente (usado em testes e quando a extração
-    /// do `.amx` é feita por fora).
-    #[allow(dead_code)] // usado em testes e pela integração futura
+    /// Injeta um bloco de debug diretamente, sem passar pelo `.amx`.
+    #[cfg(test)]
     pub fn set_debug(&mut self, dbg: AmxDbg) {
         self.dbg = Some(dbg);
     }
@@ -1066,6 +1257,227 @@ mod tests {
         // Inválido.
         assert_eq!(parse_set_value("abc"), None);
         assert_eq!(parse_set_value(""), None);
+    }
+
+    /// Um `launch` com `serverCommand` guarda como o servidor foi iniciado, e é
+    /// isso que permite reiniciá-lo depois sem derrubar a sessão.
+    #[test]
+    fn restart_troca_o_servidor_sem_encerrar_a_sessao() {
+        let mut ses = Session::new();
+        let saida = ses.handle(&req(
+            "launch",
+            &json!({
+                "program": "/tmp/gm.amx",
+                "session": "s1",
+                "serverCommand": { "exe": "/tmp/omp-server", "args": [], "cwd": "/tmp" }
+            }),
+        ));
+        assert!(
+            saida.iter().any(|o| matches!(o, Outgoing::SpawnServer(_))),
+            "o launch deve subir o servidor"
+        );
+
+        let saida = ses.handle(&req("restart", &json!({})));
+        assert!(
+            saida.iter().any(|o| matches!(o, Outgoing::SpawnServer(_))),
+            "o restart deve trocar o servidor"
+        );
+        assert!(
+            !saida
+                .iter()
+                .any(|o| matches!(o, Outgoing::Event(e) if e.event == "terminated")),
+            "o restart NÃO deve encerrar a sessão"
+        );
+        assert!(!ses.terminated, "a sessão segue viva depois do restart");
+    }
+
+    /// Sequência real do editor: `setBreakpoints` chega ANTES do `launch`
+    /// (o editor manda os breakpoints já na configuração da sessão). Se o
+    /// pedido não sobreviver ao launch, nenhum breakpoint funciona.
+    #[test]
+    fn breakpoints_pedidos_antes_do_launch_sobrevivem() {
+        let mut ses = Session::new();
+        ses.set_debug(sample_dbg());
+        ses.handle(&req(
+            "setBreakpoints",
+            &json!({ "source": { "path": "a.pwn" }, "breakpoints": [ { "line": 4 } ] }),
+        ));
+        assert_eq!(
+            ses.resolved_breakpoints(),
+            &[(4, 20)],
+            "resolveu antes do launch"
+        );
+
+        // O launch chega depois e recarrega o bloco de debug do `.amx`.
+        ses.handle(&req(
+            "launch",
+            &json!({ "program": "/tmp/inexistente.amx", "session": "s1" }),
+        ));
+        assert_eq!(
+            ses.resolved_breakpoints(),
+            &[(4, 20)],
+            "o launch não pode descartar os breakpoints já resolvidos"
+        );
+    }
+
+    /// O editor manda `setBreakpoints` antes do `launch`, quando ainda não há
+    /// canal com o plugin — e comando sem canal é descartado. O
+    /// `configurationDone` precisa reenviar, senão nenhum breakpoint funciona.
+    #[test]
+    fn configuration_done_reenvia_os_breakpoints() {
+        let mut ses = Session::new();
+        ses.set_debug(sample_dbg());
+        ses.handle(&req(
+            "setBreakpoints",
+            &json!({ "source": { "path": "a.pwn" }, "breakpoints": [ { "line": 4 } ] }),
+        ));
+
+        let saida = ses.handle(&req("configurationDone", &json!({})));
+        assert!(
+            has_command(
+                &saida,
+                |c| matches!(c, Command::SetBreakpoints { breakpoints }
+                if breakpoints.len() == 1 && breakpoints[0].addr == 20)
+            ),
+            "o configurationDone deve reenviar o conjunto real ao plugin"
+        );
+        assert!(
+            has_command(&saida, |c| matches!(c, Command::Configured)),
+            "e liberar a VM depois"
+        );
+    }
+
+    /// Recompilar o gamemode muda o mapa linha↔endereço. O restart tem de
+    /// reresolver os breakpoints contra o `.amx` novo — senão os endereços
+    /// antigos apontariam para instruções erradas.
+    #[test]
+    fn restart_reresolve_os_breakpoints() {
+        let mut ses = Session::new();
+        ses.handle(&req(
+            "launch",
+            &json!({
+                "program": "/tmp/gm.amx",
+                "session": "s1",
+                "serverCommand": { "exe": "/tmp/omp-server", "args": [], "cwd": "/tmp" }
+            }),
+        ));
+        ses.set_debug(sample_dbg());
+        ses.handle(&req(
+            "setBreakpoints",
+            &json!({ "source": { "path": "a.pwn" }, "breakpoints": [ { "line": 4 } ] }),
+        ));
+        assert_eq!(
+            ses.resolved_breakpoints(),
+            &[(4, 20)],
+            "o setBreakpoints resolve contra o mapa atual"
+        );
+
+        // O restart limpa e resolve de novo, a partir do pedido guardado.
+        let saida = ses.handle(&req("restart", &json!({})));
+        assert_eq!(
+            ses.resolved_breakpoints(),
+            &[(4, 20)],
+            "o breakpoint continua valendo depois do restart"
+        );
+        assert!(
+            saida
+                .iter()
+                .any(|o| matches!(o, Outgoing::Event(e) if e.event == "breakpoint")),
+            "o editor precisa saber onde cada marcador ficou"
+        );
+        // Reresolver e avisar o editor não basta: o servidor novo traz um plugin
+        // novo, sem breakpoint nenhum, e num canal novo. Sem reconectar e
+        // reenviar, a VM roda sem saber onde parar e a execução passa direto.
+        assert!(
+            saida
+                .iter()
+                .any(|o| matches!(o, Outgoing::ConnectPlugin(id) if id == "s1")),
+            "o canal antigo morreu com o processo: o restart precisa reconectar"
+        );
+        assert!(
+            has_command(
+                &saida,
+                |c| matches!(c, Command::SetBreakpoints { breakpoints }
+                if breakpoints.len() == 1 && breakpoints[0].addr == 20)
+            ),
+            "e reenviar os breakpoints ao plugin do servidor novo"
+        );
+        assert!(
+            has_command(&saida, |c| matches!(c, Command::Configured)),
+            "e liberar a VM, que fica bloqueada na carga esperando o sinal"
+        );
+    }
+
+    /// Fonte mais novo que o binário: o restart pede a recompilação à extensão
+    /// em vez de subir o servidor com o `.amx` velho — os breakpoints se
+    /// resolveriam contra o mapa antigo, e a VM pararia no lugar errado.
+    #[test]
+    fn restart_pede_rebuild_quando_o_fonte_mudou() {
+        let dir = std::env::temp_dir().join("pawnpro-teste-rebuild");
+        std::fs::create_dir_all(&dir).unwrap();
+        let amx = dir.join("gm.amx");
+        let pwn = dir.join("gm.pwn");
+        std::fs::write(&amx, b"binario").unwrap();
+        // O fonte é escrito depois, então é o mais novo.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&pwn, b"fonte").unwrap();
+
+        let mut ses = Session::new();
+        ses.handle(&req(
+            "launch",
+            &json!({
+                "program": amx.to_str().unwrap(),
+                "session": "s1",
+                "serverCommand": { "exe": "/tmp/omp-server", "args": [], "cwd": "/tmp" }
+            }),
+        ));
+
+        let saida = ses.handle(&req("restart", &json!({})));
+        assert!(
+            saida
+                .iter()
+                .any(|o| matches!(o, Outgoing::Event(e) if e.event == "pawnproRebuild")),
+            "o fonte é mais novo: tem de pedir a recompilação"
+        );
+        assert!(
+            !saida.iter().any(|o| matches!(o, Outgoing::SpawnServer(_))),
+            "e NÃO subir o servidor com o binário velho"
+        );
+
+        // A extensão compila e reenvia: agora o restart segue normalmente, sem
+        // pedir de novo — senão seria laço.
+        let saida = ses.handle(&req("restart", &json!({})));
+        assert!(
+            saida.iter().any(|o| matches!(o, Outgoing::SpawnServer(_))),
+            "no reenvio o servidor sobe"
+        );
+        assert!(
+            !saida
+                .iter()
+                .any(|o| matches!(o, Outgoing::Event(e) if e.event == "pawnproRebuild")),
+            "e não pede rebuild de novo"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Sem `serverCommand` (attach), o servidor não é nosso: reiniciá-lo não é
+    /// atribuição do adaptador, e o comportamento antigo continua valendo.
+    #[test]
+    fn restart_sem_servidor_proprio_encerra_como_antes() {
+        let mut ses = Session::new();
+        ses.handle(&req("launch", &json!({ "program": "/tmp/gm.amx" })));
+
+        let saida = ses.handle(&req("restart", &json!({})));
+        assert!(
+            !saida.iter().any(|o| matches!(o, Outgoing::SpawnServer(_))),
+            "sem spawn_spec não há o que reiniciar"
+        );
+        assert!(
+            saida
+                .iter()
+                .any(|o| matches!(o, Outgoing::Event(e) if e.event == "terminated")),
+            "cai no comportamento antigo: encerra e deixa o editor recriar"
+        );
     }
 
     fn req(command: &str, args: &Value) -> Request {

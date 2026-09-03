@@ -1,0 +1,89 @@
+[align=center][size=30][b][color=#E67E22]🐛 PawnPro Debugger v0.2.0[/color][/b][/size]
+
+[size=15][i]Depurador visual (DAP) para Pawn — SA-MP e open.mp[/i]
+[i]Visual debugger (DAP) for Pawn — SA-MP and open.mp[/i][/size]
+
+[url=https://github.com/NullSablex/PawnPro-Debugger][b]github.com/NullSablex/PawnPro-Debugger[/b][/url][/align]
+
+[quote]
+🇧🇷 Nova versão do Debugger no ar 🎉 — e [b]hoje sai também a nova versão da extensão PawnPro[/b], com esta atualização do debugger integrada e outras novidades e melhorias no editor. A ideia desta release é simples: parar de depurar gamemode no [b]printf[/b].
+
+🇬🇧 New Debugger release out 🎉 — and [b]the new PawnPro extension version ships today too[/b], with this debugger update integrated plus other improvements. The point of this release is simple: stop debugging gamemodes with [b]printf[/b].
+[/quote]
+
+[size=22][b]✨ O que tem de novo / What's new[/b][/size]
+
+[b]🧭 Call stack completa[/b]
+🇧🇷 A pilha de chamadas inteira, não só a linha atual: função, linha e [b]variáveis de cada frame[/b]. Clicou no frame do chamador, a inspeção acompanha.
+🇬🇧 The whole call stack, not just the current line: function, line and [b]variables per frame[/b]. Click a caller's frame and inspection follows it.
+
+[b]👁️ Data breakpoints[/b]
+🇧🇷 "Break on Value Change": pausa quando um valor muda — globais, locais e [b]elementos de array[/b] ([b]arr[3][/b]). Ideal pra achar quem está escrevendo onde não devia.
+🇬🇧 "Break on Value Change": pauses when a value changes — globals, locals and [b]array elements[/b]. Great for finding who writes where they shouldn't.
+
+[b]💥 Pausa no erro de runtime, na linha exata[/b]
+🇧🇷 Divisão por zero, índice fora do limite e agora também [b]colisão pilha/heap[/b], [b]underflow de heap[/b] e [b]acesso inválido à memória[/b]. O debugger pausa [b]antes[/b] da VM abortar, mostrando a linha e as variáveis. É conservador por design: se não tiver certeza, não acusa — nada de falso-positivo.
+🇬🇧 Divide by zero, out-of-bounds and now [b]stack/heap collision[/b], [b]heap underflow[/b] and [b]invalid memory access[/b]. It pauses [b]before[/b] the VM aborts, showing the line and the variables. Conservative by design: no false positives.
+
+[b]🔢 Arrays e strings de verdade[/b]
+🇧🇷 Arrays expandem elemento a elemento no painel, e array de char aparece como [b]string[/b]. Dá pra editar um elemento direto ([b]arr[idx] = 10[/b]) no watch ou no console.
+🇬🇧 Arrays expand element by element, char arrays show as [b]strings[/b], and you can edit an element right from the watch or console.
+
+[b]🧠 Watch, hover e autocomplete[/b]
+🇧🇷 Expressões simples no watch e ao passar o mouse ([b]+ - * / %[/b] e comparações, com [b]arr[idx][/b]), e sugestão de variáveis em escopo no console.
+🇬🇧 Simple expressions in watch and on hover, plus in-scope variable completion in the console.
+
+[b]🧬 Memória crua (hex view)[/b]
+🇧🇷 Qualquer variável abre a memória de dados em hexadecimal, pra quando o valor formatado não conta a história toda.
+🇬🇧 Any variable opens raw data memory in hex, for when the formatted value isn't the whole story.
+
+[b]🌍 Mensagens e documentação em mais idiomas[/b]
+🇧🇷 As mensagens seguem o idioma do editor (pt-BR, en, es, ro, ru) e a documentação agora tem versão em inglês.
+🇬🇧 Messages follow the editor's language (pt-BR, en, es, ro, ru) and the docs now have an English version.
+
+[size=18][b]📋 Changelog completo / Full changelog[/b][/size]
+[url=https://github.com/NullSablex/PawnPro-Debugger/blob/master/CHANGELOG.md]CHANGELOG.md[/url]
+
+[size=22][b]🎮 Como se usa na prática / How it works in practice[/b][/size]
+
+🇧🇷 Você precisa de duas coisas: a extensão [b]PawnPro[/b] no editor e o plugin do debugger no seu servidor local — [b]uma vez só[/b]. Depois disso:
+
+[list]
+[*][b]F5[/b] no gamemode. A extensão recompila com [b]-d3[/b], sobe o servidor e conecta sozinha.
+[*][b]Clique na margem[/b] pra colocar um breakpoint. Botão direito nele: [b]condição[/b] ([b]playerid == 3[/b]), [b]contagem de acertos[/b] ([b]%10[/b] = a cada 10) ou [b]logpoint[/b] — que imprime [b]Vida: {health}[/b] no console [b]sem pausar[/b] e sem recompilar.
+[*]Pausou: veja variáveis, mude o valor na hora, ande com [b]F10[/b]/[b]F11[/b] e navegue pelos frames da call stack.
+[*]Botão direito numa variável → [b]Break on Value Change[/b] pra parar quando ela mudar.
+[/list]
+
+🇬🇧 You need two things: the [b]PawnPro[/b] extension and the debugger plugin in your local server — [b]once[/b]. Then it's F5, breakpoints in the gutter (with conditions, hit counts and logpoints), stepping, and value-change breakpoints from the Variables panel.
+
+[size=22][b]🤔 E qual a diferença de não usar? / Why bother?[/b][/size]
+
+🇧🇷 Sem debugger, o ciclo num servidor SA-MP ou open.mp é conhecido: espalhar [b]printf[/b], recompilar, reiniciar, ler log, apagar os [b]printf[/b] — e repetir quando o problema volta. Quando o script dá [b]run time error[/b], você recebe o erro e reconstrói o resto de cabeça.
+
+Com o debugger, o programa [b]para no ponto[/b]: você vê o valor real de cada variável, quem chamou quem, e a [b]linha exata[/b] onde o erro ia acontecer — antes de a VM abortar. Sem recompilar pra investigar, sem sujar o código de log temporário.
+
+🇬🇧 Without a debugger the loop is printf → recompile → restart → read logs → delete the printfs. With it, execution [b]stops at the spot[/b]: real values, who called who, and the [b]exact line[/b] of a runtime error before the VM aborts.
+
+[quote]
+🇧🇷 [b]Importante:[/b] isso é uma ferramenta de [b]desenvolvimento local[/b]. Enquanto a execução está pausada, o servidor fica congelado — é o comportamento esperado ao depurar passo a passo, e o motivo de não ser algo pra rodar em servidor de produção.
+
+🇬🇧 [b]Heads-up:[/b] this is a [b]local development[/b] tool. While paused, the server is frozen — expected when single-stepping, and why it isn't meant for production.
+[/quote]
+
+[size=22][b]🎬 Em breve / Coming soon[/b][/size]
+
+🇧🇷 Estão a caminho [b]vídeos curtos[/b] mostrando como instalar a extensão, colocar o plugin no servidor e usar o debugger no dia a dia — mini-tutoriais diretos ao ponto. [b]Sem data definida[/b] ainda; sai quando estiver bom.
+🇬🇧 [b]Short videos[/b] are on the way: installing the extension, setting up the plugin and using the debugger day to day. [b]No date yet[/b] — they ship when they're ready.
+
+[list]
+[*][url=https://github.com/NullSablex/PawnPro][b]PawnPro[/b][/url] — 🇧🇷 extensão do editor (nova versão hoje) / 🇬🇧 the editor extension (new version today)
+[*][url=https://github.com/NullSablex/PawnPro-Debugger][b]PawnPro Debugger[/b][/url] — 🇧🇷 este projeto / 🇬🇧 this project
+[*][url=https://pawnpro-debugger.nullsablex.com/][b]Documentação / Docs[/b][/url] — 🇧🇷 começando, recursos e como funciona por dentro
+[*][url=https://github.com/NullSablex/rust-samp][b]rust-samp[/b][/url] — 🇧🇷 SDK em Rust que sustenta o debugger / 🇬🇧 the Rust SDK underneath
+[/list]
+
+[align=center][i]🇧🇷 Feedback, issues e PRs são bem-vindos — inclusive relato de caso que o debugger não pegou.
+🇬🇧 Feedback, issues and PRs are welcome — including cases the debugger failed to catch.[/i]
+
+[url=https://github.com/NullSablex/PawnPro-Debugger][b]⭐ github.com/NullSablex/PawnPro-Debugger[/b][/url][/align]

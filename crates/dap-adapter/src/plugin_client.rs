@@ -11,6 +11,7 @@ use std::thread;
 use std::time::Duration;
 
 use interprocess::local_socket::traits::Stream as _;
+use pawnpro_dbg_protocol::messages::{self, Locale, MsgKey};
 use pawnpro_dbg_protocol::transport::{self, LocalStream};
 use pawnpro_dbg_protocol::{self as wire, Command, Event};
 use serde_json::json;
@@ -84,6 +85,27 @@ struct Writer {
 /// na fila e são descarregados assim que o socket abre.
 pub struct PluginClient {
     writer: Arc<Mutex<Writer>>,
+}
+
+/// Avisa no console quando o plugin do servidor e o adaptador têm versões
+/// diferentes.
+///
+/// Versões diferentes conversam até a primeira mensagem que um dos lados não
+/// entende, e o sintoma é a depuração simplesmente não fazer nada. Dizer qual é
+/// a diferença troca uma falha muda por uma instrução.
+fn avisar_se_versao_difere(plugin: &str, out: &DapOut) {
+    let minha = env!("CARGO_PKG_VERSION");
+    if plugin == minha {
+        return;
+    }
+    // Mesmo locale que o adaptador propaga ao plugin: a fonte já existe.
+    let loc = std::env::var("PAWNPRO_DBG_LOCALE")
+        .map_or_else(|_| Locale::default(), |t| Locale::from_tag(&t));
+    let texto = messages::format(loc, MsgKey::PluginVersaoDiferente, &[plugin, minha, minha]);
+    out.event(
+        "output",
+        json!({ "category": "important", "output": format!("{texto}\n") }),
+    );
 }
 
 impl PluginClient {
@@ -194,6 +216,7 @@ impl PluginClient {
                             let _ = tx.send(bytes);
                         }
                     }
+                    Ok(Event::Hello { version }) => avisar_se_versao_difere(&version, &out),
                     Ok(Event::Exited) => {
                         out.event("terminated", serde_json::Value::Null);
                         break;
@@ -301,5 +324,47 @@ pub fn update_array_elem(frame: usize, var_index: usize, elem: usize, value: &st
             .and_then(|arr| arr.children.get_mut(elem))
     {
         child.value = value.to_string();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Versões iguais são o caso normal: avisar ali seria ruído em toda sessão.
+    #[test]
+    fn versao_igual_nao_avisa() {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let out = DapOut::new(Box::new(Sink(Arc::clone(&buf))), 1);
+        avisar_se_versao_difere(env!("CARGO_PKG_VERSION"), &out);
+        assert!(buf.lock().unwrap().is_empty());
+    }
+
+    /// Versão diferente é o caso de #85: sem o aviso, a depuração falha em
+    /// silêncio e nada no editor explica por quê.
+    #[test]
+    fn versao_diferente_avisa_com_as_duas() {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let out = DapOut::new(Box::new(Sink(Arc::clone(&buf))), 1);
+        avisar_se_versao_difere("0.1.0", &out);
+        let saida = String::from_utf8_lossy(&buf.lock().unwrap()).into_owned();
+        assert!(saida.contains("0.1.0"), "a versão do plugin");
+        assert!(
+            saida.contains(env!("CARGO_PKG_VERSION")),
+            "e a do adaptador"
+        );
     }
 }

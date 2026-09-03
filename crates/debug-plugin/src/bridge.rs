@@ -138,6 +138,12 @@ fn handle_client(stream: LocalStream) {
     if let Ok(mut guard) = BRIDGE.out.lock() {
         *guard = Some(send);
     }
+    // Antes de qualquer outra coisa: quem somos. O adaptador compara com a
+    // própria versão e avisa o usuário se forem incompatíveis, em vez de
+    // deixar a depuração falhar sem explicação.
+    BRIDGE.send(&Event::Hello {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    });
     let reader = BufReader::new(recv);
     for line in reader.lines() {
         let Ok(line) = line else { break };

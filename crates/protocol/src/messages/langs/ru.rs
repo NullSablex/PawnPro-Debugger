@@ -13,6 +13,9 @@ pub fn get(key: MsgKey) -> &'static str {
         MsgKey::HeapLow => "переполнение кучи снизу",
         MsgKey::MemAccess => "недопустимый доступ к памяти",
         MsgKey::RuntimeErrorsLabel => "Ошибки времени выполнения",
+        MsgKey::PluginVersaoDiferente => {
+            "Плагин отладки {}, адаптер {}. Обновите плагин сервера до {}."
+        }
         MsgKey::InvalidValue => {
             "недопустимое значение: '{}' (целое, напр. 100/0x64; дробное, напр. 1.5; или true/false)"
         }
