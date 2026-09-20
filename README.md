@@ -1,3 +1,30 @@
+> [!IMPORTANT]
+> ## Este repositório foi arquivado
+>
+> O depurador passou a fazer parte do **[PawnPro-Core](https://github.com/NullSablex/PawnPro-Core)**:
+> o adaptador DAP virou a crate `crates/debugger/adapter`, o protocolo,
+> `crates/debugger/protocol`, e o plugin do servidor,
+> `crates/debugger/plugin`. O desenvolvimento continua lá.
+>
+> | Para | Vá para |
+> |---|---|
+> | Código e histórico novo | [PawnPro-Core](https://github.com/NullSablex/PawnPro-Core) |
+> | Plugin do servidor (`pawnpro_debug.so` / `.dll`) | As [releases do PawnPro-Core](https://github.com/NullSablex/PawnPro-Core/releases) |
+> | Issues e pull requests | [Issues do PawnPro-Core](https://github.com/NullSablex/PawnPro-Core/issues) |
+> | Documentação | <https://pawnpro-core.nullsablex.com/debugger/> |
+>
+> **Por que a mudança:** o adaptador era um binário à parte, e a extensão tinha
+> de localizá-lo, lançá-lo e cuidar do ciclo por fora. No núcleo, ele é uma
+> biblioteca supervisionada: a sessão sobe e derruba o servidor do jogo, e o
+> plugin conecta no mesmo soquete local do IntelliSense. A última versão
+> publicada aqui foi a **0.2.1**; a continuação está na **0.1.0** do núcleo.
+>
+> **Licença:** o que está neste repositório permanece sob **AGPL-3.0-or-later**.
+> No núcleo, o código segue sob a licença dele, a
+> [PawnPro-Core License v1.0](https://github.com/NullSablex/PawnPro-Core/blob/master/LICENSE.md).
+>
+> As releases e o histórico deste repositório ficam de pé, para referência.
+
 <h1 align="center">PawnPro Debugger</h1>
 
 <p align="center">
